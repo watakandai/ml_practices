@@ -19,3 +19,13 @@ You can pass argument to choose any grid size you want.
 run `python GridWorld -s 6` for example
 
 ![4*4 Grid Values](https://user-images.githubusercontent.com/11141442/44100466-1fe58098-a020-11e8-9024-eb0917abaf79.png)
+
+
+
+# Jack's Car Rental
+## Problem
+![Overview](ProblemOverview.png)
+
+
+## Expected Answer
+![Solution](https://user-images.githubusercontent.com/11141442/44181000-3ab64900-a13a-11e8-9999-a0bcd2af0bca.png)
