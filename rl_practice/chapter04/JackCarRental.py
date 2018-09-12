@@ -1,6 +1,6 @@
 from __future__ import print_function
 
-import math
+from math import *
 import pickle
 import argparse
 import numpy as np
@@ -8,16 +8,23 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 
-def rentnum_probaility(n, lam):
-    return (lam**n/math.factorial(n))*math.exp(-lam)
+poissonBackup = dict()
+def poisson(n, lam):
+    global poissonBackup
+    key = n * 10 + lam
+    if key not in poissonBackup.keys():
+        poissonBackup[key] = exp(-lam) * pow(lam, n) / factorial(n)
+    return poissonBackup[key]
 
 
 def calcValue(state, credit, action, action_cost, values, max_car, lambdas, gamma):
     returns = 0.0
 
     returns -= action_cost * abs(action)
-    for request1 in range(max_car):
-        for request2 in range(max_car):
+    # for request1 in range(max_car):
+     #    for request2 in range(max_car):
+    for request1 in range(0,11):
+        for request2 in range(0,11):
             next_state1 = int(min(state[0] - action, max_car))
             next_state2 = int(min(state[1] + action, max_car))
 
@@ -28,35 +35,32 @@ def calcValue(state, credit, action, action_cost, values, max_car, lambdas, gamm
             next_state1 -= rentable_num1
             next_state2 -= rentable_num2
 
-            prob =  rentnum_probaility(next_state1, lambdas["Request1"]) * \
-                    rentnum_probaility(next_state2, lambdas["Request2"])
+            prob =  poisson(request1, lambdas["Request1"]) * \
+                    poisson(request2, lambdas["Request2"])
 
             returnable_num1 = int(max_car-next_state1)
             returnable_num2 = int(max_car-next_state2)
 
-            '''
-            print('next state 1: {}'.format(next_state1))
-            print('next state 2: {}'.format(next_state2))
-            print('rentable 1: {}'.format(rentable_num1))
-            print('rentable 2: {}'.format(rentable_num2))
-            print('reward: {}'.format(reward))
-            print('prob: {}'.format(prob))
-            print('returnable_num1: {}'.format(returnable_num1))
-            print('returnable_num2: {}'.format(returnable_num2))
-            '''
-            for return1 in range(returnable_num1):
-                for return2 in range(returnable_num2):
-                    state1     = next_state1
-                    state2     = next_state2
-                    total_prob =    rentnum_probaility(return1, lambdas["Return1"]) * \
-                                    rentnum_probaility(return2, lambdas["Return2"]) * prob
-                    state1     += return1
-                    state2     += return2
-                    # print('return1: {}'.format(return1))
-                    # print('return2: {}'.format(return2))
-                    # print('state1: {}'.format(state1))
-                    # print('state2: {}'.format(state2))
-                    returns += total_prob * (reward + gamma*values[state1, state2] )
+            constantReturnedCars = True
+            if constantReturnedCars:
+                state1 = min(next_state1+lambdas["Return1"], max_car)
+                state2 = min(next_state2+lambdas["Return2"], max_car)
+                returns += prob * (reward + gamma * values[state1, state2])
+            else:
+                for return1 in range(returnable_num1):
+                    for return2 in range(returnable_num2):
+                        state1     = next_state1
+                        state2     = next_state2
+                        total_prob =    poisson(return1, lambdas["Return1"]) * \
+                                        poisson(return2, lambdas["Return2"]) * prob
+                        state1     += return1
+                        state2     += return2
+                        # print('return1: {}'.format(return1))
+                        # print('return2: {}'.format(return2))
+                        # print('state1: {}'.format(state1))
+                        # print('state2: {}'.format(state2))
+                        returns += total_prob * (reward + gamma*values[state1, state2] )
+
 
     return returns
 
@@ -70,7 +74,7 @@ def JackCarRental(args):
     lambdas     = {"Request1":3, "Request2":4, "Return1":3, "Return2":2}
     threshold   = 0.001
     # Print Variables
-    print('----------------------Variables-------------------------')
+    print('----------------Variables & Constants -----------------')
     print('Max Cars: {}'.format(max_car))
     print('Credit for 1 Car Rental: {}'.format(credit))
     print('Cost for 1 Action: {}'.format(action_cost))
@@ -115,9 +119,10 @@ def JackCarRental(args):
                 print(values.astype('int64'))
                 break
 
-            print(values.astype('int64'))
-            print('New Value')
-            print(new_values.astype('int64'))
+            # print('Value:')
+            # print(values.astype('int64'))
+            # print('New Value')
+            # print(new_values.astype('int64'))
             values = new_values.copy()
 
         # Policy Improvement
@@ -130,14 +135,13 @@ def JackCarRental(args):
             bestAction = np.argmax(actionReturns)
             new_policies[i,j] = actions[bestAction]
 
-        if new_policies != policies:
-            policy_stable = False
+        policyChanges = np.sum(new_policies != policies)
+        print('Policy for {} states changed'.format(policyChanges))
+        if policyChanges == 0:
+            policies = new_policies
+            break
         policies = new_policies
         record_actions.append(policies)
-
-        if policy_stable:
-            break
-
 
     return states, record_values, record_actions
 
@@ -171,6 +175,7 @@ def main(args):
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description='Jacks Car Rental')
+    parser.print_help()
     parser.add_argument('--max_car', '-mc', type=int, default=20,
                         help='Max Number of Cars at Each Shop')
     parser.add_argument('--gamma', '-g', type=int, default=0.9,
