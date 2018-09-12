@@ -48,12 +48,16 @@ def policy_evaluation(states, values, policy, gridsize, threshold=0.0000001):
                 v       = values[state]
                 new_v   = calc_new_value(state, values, policy, gridsize)
                 new_values[state] = new_v
+                # values[state] = new_v
 
                 delta = max(delta, v-new_v)
         if delta<threshold:
             break
 
         values = new_values.copy()
+        # delete new_values.copy() for offpolicy??
+
+        np.set_printoptions(precision=2)
         print(np.reshape(values, (gridsize, gridsize)))
         iteration +=1
 
