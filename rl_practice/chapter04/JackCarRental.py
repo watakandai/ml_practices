@@ -145,32 +145,56 @@ def JackCarRental(args):
 
     return states, record_values, record_actions
 
+# axes for printing use
+AxisXPrint = []
+AxisYPrint = []
+for i in range(0, 20 + 1):
+    for j in range(0, 20 + 1):
+        AxisXPrint.append(i)
+        AxisYPrint.append(j)
+
+figureIndex = 0
+def prettyPrint(states, data, labels):
+    global figureIndex
+    fig = plt.figure(figureIndex)
+    figureIndex += 1
+    ax = fig.add_subplot(111, projection='3d')
+    AxisZ = []
+    for i, j in states:
+        AxisZ.append(data[i, j])
+    ax.scatter(AxisXPrint, AxisYPrint, AxisZ)
+    ax.set_xlabel(labels[0])
+    ax.set_ylabel(labels[1])
+    ax.set_zlabel(labels[2])
+
 def main(args):
-    states, values, policies = JackCarRental(args)
-    with open('values.pkl', 'wb') as fvalue:
-        pickle.dump(values,fvalue)
-    with open('policies', 'wb') as fpolicy:
-        pickle.dump(policies, fpolicy)
-    best_value  = values[-1]
-    best_policy = policies[-1]
+    if args.justprint:
+        states = pickle.load(open('states.pkl', 'rb'))
+        policies = pickle.load(open('policies.pkl', 'rb'))
+        values = pickle.load(open('values.pkl', 'rb'))
+        prettyPrint(states, policies[-1], ['# of cars in first location', '# of cars in second location', '# of cars to move during night'])
+        prettyPrint(states, values[-1], ['# of cars in first location', '# of cars in second location', 'expected returns'])
+        plt.show()
+    else:
+        states, values, policies = JackCarRental(args)
+        with open('states.pkl', 'wb') as fstate:
+            pickle.dump(states, fstate)
+        with open('values.pkl', 'wb') as fvalue:
+            pickle.dump(values,fvalue)
+        with open('policies.pkl', 'wb') as fpolicy:
+            pickle.dump(policies, fpolicy)
+        best_value  = values[-1]
+        best_policy = policies[-1]
 
-    print('BEST VALUE: ------')
-    print(best_value)
-    print('BEST POLICY: ------')
-    print(best_policy)
+        print('BEST VALUE: ------')
+        print(best_value)
+        print('BEST POLICY: ------')
+        print(best_policy)
 
-    max_car     = args.max_car # No. of Cars: 0~max_car
+        prettyPrint(states, policies[-1], ['# of cars in first location', '# of cars in second location', '# of cars to move during night'])
+        prettyPrint(states, values[-1], ['# of cars in first location', '# of cars in second location', 'expected returns'])
 
-    x = np.array(range(max_car+1))
-    y = np.array(range(max_car+1))
-    X, Y = np.meshgrid(x, y)
-    fig = plt.figure()
-    ax = Axes3D(fig)
-    ax.plot_wireframe(X, Y, best_value) #<---ここでplot
-
-    if args.saveimage == True:
         plt.savefig('figure.png')
-    if args.showimage == True:
         plt.show()
 
 if __name__=='__main__':
@@ -192,6 +216,8 @@ if __name__=='__main__':
                         help='Save Image')
     parser.add_argument('--showimage', '-i', action='store_true',
                         help='Show Image')
+    parser.add_argument('--justprint', '-j', action='store_true',
+                        help='Just Show Image from pickle file')
     args = parser.parse_args()
 
     main(args)
