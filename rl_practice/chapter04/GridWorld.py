@@ -59,7 +59,7 @@ def policy_evaluation(states, values, policy, gridsize, threshold=0.0000001):
 
     return iteration
 
-def policty_improvement():
+def policy_improvement():
     pass
 
 def main():
