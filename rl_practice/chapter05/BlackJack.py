@@ -1,3 +1,21 @@
+########################################################
+#
+# Black Jack Rule:
+#   - 21超えないMaxを狙う．
+#   - 絵札は全部10点とする
+#   - エース(A)は 1点でも11点にもなりうる
+#   - 今回はユーザーvsディーラーの1on1
+#   - ディーラー，ユーザー共に2枚から始める
+#   - その内，ディーラーの1枚は見えるものとする
+#   - 始めから21があれば，"Natural"と呼び，ディーラーも21がなければ勝ち．あれば引き分け．．
+#   - if wanted, request another card
+#   - dealer's turn (hit under 16, stay over 17)
+#
+#   - cards are dealt from infinite deck
+#   - Ace: 11とカウントしてBustにならない＝Usable = 11
+#   ディーラー，プレーヤーの合計，エースの獲得はランダム
+#
+########################################################
 from __future__ import print_function
 
 import math
@@ -6,13 +24,38 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
+################### GLOBAL CONSTANTS ###################
+# actions: hit or stand
+ACTION_HIT = 0
+ACTION_STAND = 1  #  "strike" in the book
+actions = [ACTION_HIT, ACTION_STAND]
+
+# policy for player
+policyPlayer = np.zeros(22)
+for i in range(12, 20):
+    policyPlayer[i] = ACTION_HIT
+policyPlayer[20] = ACTION_STAND
+policyPlayer[21] = ACTION_STAND
+
+# policy for dealer
+policyDealer = np.zeros(22)
+for i in range(12, 17):
+    policyDealer[i] = ACTION_HIT
+for i in range(17, 22):
+    policyDealer[i] = ACTION_STAND
+########################################################
+
 # get a new card
 def getCard():
     card = np.random.randint(1, 14)
     card = min(card, 10)
     return card
 
-def play(policyPlayerFn, initialState=None, initialAction=None):
+# play a game
+# @policyPlayerFn: specify policy for player
+# @initialState: [whether player has a usable Ace, sum of player's cards, one card of dealer]
+# @initialAction: the initial action
+def playBlackJack(policyPlayerFn, initialState=None, initialAction=None):
     # player status
 
     # sum of player
@@ -143,33 +186,89 @@ def play(policyPlayerFn, initialState=None, initialAction=None):
     else:
         return state, -1, playerTrajectory
 
+def policyFn(usableAcePlayer, playerSum, dealerCard):
+    usableAcePlayer = int(usableAcePlayer)
+    playerSum -= 12
+    dealerCard -= 1
+    actionValues = []
+    for action in actions:
+        statevalue = stateValue[playerSum, dealerCard, usableAcePlayer, action]
+        paircount = stateActionPairCount[playerSum, dealerCard, usableAcePlayer, action]
+        actionValues.append(statevalue/paircount)
+    index = np.argmax(actionValues)
+    return actions[index]
 
-def BlackJack(args):
-    pass
+
+stateValue = np.zeros((10, 10, 2, 2))
+stateActionPairCount = np.ones((10, 10, 2, 2))
+def Example5_3(args):
+    global stateValue, stateActionPairCount
+    num_episode = args.num_episode
+    for episode in range(num_episode):
+        if episode % 1000 == 0:
+            print('episode:', episode)
+        initialState = [bool(np.random.choice([0, 1])),
+                       np.random.choice(range(12, 22)),
+                       np.random.choice(range(1, 11))]
+        initialAction = np.random.choice(actions)
+        _, reward, trajectory = playBlackJack(policyFn, initialState, initialAction)
+        for (usableAce, playerSum, dealerCard), action in trajectory:
+            usableAce = int(usableAce)
+            playerSum -= 12
+            dealerCard -= 1
+            stateValue[playerSum, dealerCard, usableAce, action] += reward
+            stateActionPairCount[playerSum, dealerCard, usableAce, action] += 1
+
+    return stateValue / stateActionPairCount
+
+
+# print the state value
+figureIndex = 0
+def prettyPrint(data, tile, zlabel='reward'):
+    global figureIndex
+    fig = plt.figure(figureIndex)
+    figureIndex += 1
+    fig.suptitle(tile)
+    ax = fig.add_subplot(111, projection='3d')
+    axisX = []
+    axisY = []
+    axisZ = []
+    for i in range(12, 22):
+        for j in range(1, 11):
+            axisX.append(i)
+            axisY.append(j)
+            axisZ.append(data[i - 12, j - 1])
+    ax.scatter(axisX, axisY, axisZ)
+    ax.set_xlabel('player sum')
+    ax.set_ylabel('dealer showing')
+    ax.set_zlabel(zlabel)
+
+
 
 def main(args):
+    stateActionValues = Example5_3(args)
 
-    states, values, policies = BlacJack(args)
-
-    x = np.random.random((100, 100))
-    plt.imshow(x, cmap="PuRd")
-    plt.colorbar()
-
-    x = np.arange(-3, 3, 0.25)
-    y = np.arange(-3, 3, 0.25)
-    X, Y = np.meshgrid(x, y)
-    Z = np.sin(X)+ np.cos(Y)
-    fig = plt.figure()
-    ax = Axes3D(fig)
-    ax.plot_wireframe(X, Y, Z) #<---ここでplot
-
-    if args.saveimage == True:
-        plt.savefig('figure.png')
-    if args.showimage == True:
-        plt.show()
+    stateValueUsableAce = np.zeros((10, 10))
+    stateValueNoUsableAce = np.zeros((10, 10))
+    # get the optimal policy
+    actionUsableAce = np.zeros((10, 10), dtype='int')
+    actionNoUsableAce = np.zeros((10, 10), dtype='int')
+    for i in range(10):
+        for j in range(10):
+            stateValueNoUsableAce[i, j] = np.max(stateActionValues[i, j, 0, :])
+            stateValueUsableAce[i, j] = np.max(stateActionValues[i, j, 1, :])
+            actionNoUsableAce[i, j] = np.argmax(stateActionValues[i, j, 0, :])
+            actionUsableAce[i, j] = np.argmax(stateActionValues[i, j, 1, :])
+    prettyPrint(stateValueUsableAce, 'Optimal state value with usable Ace')
+    prettyPrint(stateValueNoUsableAce, 'Optimal state value with no usable Ace')
+    prettyPrint(actionUsableAce, 'Optimal policy with usable Ace', 'Action (0 Hit, 1 Stick)')
+    prettyPrint(actionNoUsableAce, 'Optimal policy with no usable Ace', 'Action (0 Hit, 1 Stick)')
+    plt.show()
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description='Black Jack Function Approximation using Monte Carlo Estimation')
+    parser.add_argument('--num_episode', '-n', type=int, default=500000,
+                        help='Number of Episodes')
     parser.add_argument('--saveimage', '-s', action='store_true',
                         help='Save Image')
     parser.add_argument('--showimage', '-i', action='store_true',
