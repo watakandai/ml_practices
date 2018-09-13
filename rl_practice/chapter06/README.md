@@ -17,3 +17,11 @@ $$$
 $$$
 V(S_t) = V(S_t) + ¥alpha*(R_{t+1} + ¥gamma*V(S_{t+1}) - V(S_t))
 $$$
+
+
+# Cliff Walking
+
+## Sum of Rewards During Episode
+average of 50 runs
+500 episodes
+![sumofrewardsforcliff](https://user-images.githubusercontent.com/11141442/45485699-81c44800-b793-11e8-87a6-25a300130e8b.jpg)
