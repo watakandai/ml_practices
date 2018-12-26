@@ -43,6 +43,8 @@ class StateVisitationFrequency:
 
 def compute_experts_feature(n_features, trajectories):
     n_trajectories, n_steps = trajectories.shape
+    print('n_trajectories: %i' % (n_trajectories))
+    print('n_steps: %i' % (n_steps))
 
     def one_hot_encoder(array):
         ncols = n_features

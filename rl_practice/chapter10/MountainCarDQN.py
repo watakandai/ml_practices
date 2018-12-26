@@ -2,8 +2,11 @@ from __future__ import print_function
 import random
 import gym
 import math
+import time
+import pickle
 import numpy as np
 import tensorflow as tf
+import matplotlib
 import matplotlib.pyplot as plt
 
 MIN_EPSILON = 0.1
@@ -12,6 +15,22 @@ LAMBDA = 0.8
 GAMMA = 1
 BATCH_SIZE = 10
 
+human_agent_action = -1
+human_wants_restart = False
+human_sets_pause = False
+
+def key_press(key, mod):
+    global human_agent_action, human_wants_restart, human_sets_pause
+    if key==0xff0d: human_wants_restart = True
+    if key==32: human_sets_pause = not human_sets_pause
+    a = int( key - ord('0') )
+    human_agent_action = a
+
+def key_release(key, mod):
+    global human_agent_action
+    a = int( key - ord('0') )
+    if human_agent_action == a:
+        human_agent_action = -1
 
 class GameRunner:
     def __init__(self, sess, model, env, memory, max_eps, min_eps,
@@ -30,6 +49,7 @@ class GameRunner:
         self._max_x_store = []
 
     def run(self):
+        global human_agent_action, human_wants_restart, human_sets_pause
         state = self._env.reset()
         tot_reward = 0
         max_x = -100
@@ -37,14 +57,20 @@ class GameRunner:
             if self._render:
                 self._env.render()
 
-            action = self._choose_action(state)
+            if human_agent_action >= 0:
+                action = human_agent_action
+            else:
+                action = self._choose_action(state)
             next_state, reward, done, info = self._env.step(action)
+
+            '''
             if next_state[0] >= 0.1:
                 reward += 10
             elif next_state[0] >= 0.25:
                 reward += 20
             elif next_state[0] >= 0.5:
                 reward += 100
+            '''
 
             if next_state[0] > max_x:
                 max_x = next_state[0]
@@ -71,7 +97,14 @@ class GameRunner:
                 self._max_x_store.append(max_x)
                 break
 
+            while human_sets_pause:
+                env.render()
+                time.sleep(0.1)
+
         print("Step {}, Total reward: {}, Eps: {}".format(self._steps, tot_reward, self._eps))
+
+
+
 
     def _choose_action(self, state):
         if random.random() < self._eps:
@@ -163,7 +196,11 @@ class Memory:
 
 if __name__ == "__main__":
     env_name = 'MountainCar-v0'
+    env_name = 'FetchReach-v1'
     env = gym.make(env_name)
+    env.render()
+    env.unwrapped.viewer.window.on_key_press = key_press
+    env.unwrapped.viewer.window.on_key_release = key_release
 
     num_states = env.env.observation_space.shape[0]
     num_actions = env.env.action_space.n
@@ -182,8 +219,8 @@ if __name__ == "__main__":
                 print('Episode {} of {}'.format(cnt+1, num_episodes))
             gr.run()
             cnt += 1
-        plt.plot(gr._reward_store)
-        plt.show()
-        plt.close("all")
-        plt.plot(gr._max_x_store)
-        plt.show()
+
+        with open('reward.pickle', mode='wb') as f:
+            pickle.dump(gr._reward_store, f)
+        with open('max_x.pickle', mode='wb') as f:
+            pickle.dump(gr._max_x_store, f)

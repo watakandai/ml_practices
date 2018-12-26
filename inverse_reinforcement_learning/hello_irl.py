@@ -16,11 +16,17 @@ register(id='EasyFrozenLakeEnv-v0',  entry_point='gym.envs.toy_text:FrozenLakeEn
 def train(gamma, epsilon, n_samples, n_steps, n_epochs, learning_rate):
     env = gym.make('EasyFrozenLakeEnv-v0')
     value_iteration = ValueIteration(env.nS, env.nA, env.P)
+    print('Env States: %i' % (env.nS))
 
     # preparing an expert
+    # Calculate OPTIMAL POLICY
     V, policy = value_iteration(gamma, epsilon)
+    # Use PI_opt to Sample
     trajectories = sample_trajectories(env, policy, n_steps, n_samples)
+    # 1 if Visited, 0 if Not Visited
+    # Feature = Average visited in 100 Samples of 10 Steps
     experts_feature = compute_experts_feature(env.nS, trajectories)
+    print(experts_feature[:,])
 
     # training
     feature_matrix = np.eye(env.nS)
@@ -28,6 +34,7 @@ def train(gamma, epsilon, n_samples, n_steps, n_epochs, learning_rate):
     svf = StateVisitationFrequency(env.nS, env.nA, env.P)
 
     for i in range(n_epochs):
+        # Iterate to get
         V, policy = value_iteration(gamma, epsilon, reward_function)
         P = svf(policy, trajectories)
         grad = experts_feature - feature_matrix.T.dot(P)
@@ -49,6 +56,6 @@ if __name__ == '__main__':
     reward = train(args.gamma, args.epsilon, args.n_samples, args.n_steps,
                    args.n_epochs, args.learning_rate)
     plt.pcolor(reward.reshape(4, 4)[::-1, :])
-    plt.title(f'samples: {args.n_samples}, steps: {args.n_steps}')
+    # plt.title(f'samples: {args.n_samples}, steps: {args.n_steps}')
     plt.colorbar()
     plt.show()
