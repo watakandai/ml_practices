@@ -12,7 +12,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.python import keras as K
 from collections import deque
-import matplotlib.pyplot as plt
+
 
 class ReplayBuffer():
     def __init__(self, buffer_size=50000, batch_size=32):
@@ -26,17 +26,23 @@ class ReplayBuffer():
     def sample(self):
         return random.sample(self.experiences, self.batch_size)
 
+    def is_full(self):
+        return len(self.experiences) == self.buffer_size
+
+
 class DQNAgent():
     def __init__(self, env, model_path, episode=1000, learning_rate=1e-3, init_eps=0.5, final_eps=1e-3):
         self.env = env
+        self.model_path = model_path
         self.learning_rate = self.learning_rate
         self.actions = list(range(env.action_space.n))
         self.model = self.define_model()
-        self._target_model = K.models.clone_model(self.model)
         self.optimizer = K.optimizers.Adam(lr=self.learning_rate, clipvalue=1.0)
         self.model.compile(self.optimizer, loss='mse')
+        self._target_model = K.models.clone_model(self.model)
         self.epsilon = init_eps
-        self.decay = (initial_epsilon - final_epsilon)/episode
+        self.decay = max((initial_epsilon - final_epsilon)/episode, 0) # no negative
+        self.training = False
 
     def define_model(self):
         normal = K.initializers.glorot_normal()
@@ -59,14 +65,20 @@ class DQNAgent():
                                  activation="relu"))
         model.add(K.layers.Dense(len(self.actions), kernel_initializer=normal,
                                  activation="relu"))
+        return model
 
-    def update_target():
-        self._target_model.set_weights(self.model.get_weights())
+    def update_target_network():
+        if self.training:
+            self._target_model.set_weights(self.model.get_weights())
 
     def update_epsilon():
-        self.epsilon -= self.decay
+        if self.training:
+            self.epsilon -= self.decay
 
     def train(self, batch):
+        if self.training is False:
+            self.training = True
+
         x_batch = []
         y_batch = []
         for sample in batch:
@@ -91,8 +103,13 @@ class DQNAgent():
         return loss
 
     def policy(self, s):
+        # Initial Random Policy
+        if not self.training:
+            return np.random.randint(len(self.actions))
+        # Epsilon
         if np.random.random() < self.epsilon:
             return np.random.randint(len(self.actions))
+        # Greedy
         return np.argmax(self.model.predict(s))
 
     def save(self):
@@ -102,7 +119,6 @@ class DQNAgent():
     def load(cls, env, model_path, init_eps=0.0001):
         agent = cls(env, model_path, init_eps)
         agent.model = K.models.load_model(model_path)
-        agent.initialized = True
         return agent
 
     def play(self, episode_count=5, render=True):
@@ -121,7 +137,6 @@ class DQNAgent():
                 print("Get reward {}.".format(episode_reward))
 
 
-
 def train(env, model_path):
     episode = 1000
     target_network_update = 10
@@ -137,8 +152,9 @@ def train(env, model_path):
         for e in range(episode):
             # Every other step, update target network
             if e % target_network_update == 0:
-                agent.update_target()
+                agent.update_target_network()
 
+            done = False
             while not done:
                 # Choose Action
                 a = agent.policy(s)
@@ -146,27 +162,29 @@ def train(env, model_path):
                 n_s, r, done, info = agent.play(a)
                 # Add to buffer
                 replay_buffer.append(s, a, r, n_s, done)
-                # Sample from buffer
-                batch = replay_buffer.sample()
-                # Train
-                loss = agent.train(batch)
-                # Save loss in tensorboard
-                summary = tf.Summary(value=[tf.Summary.Value(tag="loss",
-                                             simple_value=loss), ])
-                summary_writer.add_summary(summary)
+
+                if replay_buffer.is_full():
+                    # Sample from buffer
+                    batch = replay_buffer.sample()
+                    # Train
+                    loss = agent.train(batch)
+                    # Save loss in tensorboard
+                    # TODO
+                    summary = tf.Summary(value=[tf.Summary.Value(tag="loss",
+                                                simple_value=loss), ])
+                    summary_writer.add_summary(summary)
+
                 # Update state
                 s = n_s
 
-            agent.save(file_name))
+            agent.save(file_name)
             agent.update_epsilon()
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="DQN Agent")
     parser.add_argument("--play", action="store_true",
                         help="play with trained model")
-    parser.add_argument("--test", action="store_true",
-                        help="train by test mode")
-    parser.add_argument("--env_name", type=str,
+    parser.add_argument("--env_name", type=str, default='CartPole-v0',
                         help="name of the environment")
 
     return parser.parse_args()
