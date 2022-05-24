@@ -7,7 +7,7 @@ scipy==1.3.0
 scikit-learn==0.21.2
 matplotlib==3.1.0
 #  tensorflow==1.14.0
-tensorflow-gpu==1.14.0
+tensorflow-gpu==2.6.4
 -e git+https://github.com/ntasfi/PyGame-Learning-Environment.git#egg=ple
 -e git+https://github.com/lusob/gym-ple.git#egg=gym-ple
 h5py==2.9.0
