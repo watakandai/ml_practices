@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from transformers import get_cosine_schedule_with_warmup
 
-from .data import load_split
+from .data import load_meta, load_split
 from .evaluate import evaluate_all, evaluate_split
 from .vla import DEFAULT_MODEL, VLA, VLAPolicy
 
@@ -121,7 +121,7 @@ def main():
     sched = get_cosine_schedule_with_warmup(opt, args.warmup, args.max_steps)
     scaler = torch.amp.GradScaler("cuda", enabled=device == "cuda")
     heldout = load_split(args.data, "test_seeds")
-    meta_level = json.load(open(os.path.join(args.data, "meta.json")))
+    meta = load_meta(args.data)
     log = open(os.path.join(args.out, "log.jsonl"), "a")
 
     vla.model.train()
@@ -150,9 +150,9 @@ def main():
             losses, accs = [], []
 
         if args.eval_every and step % args.eval_every == 0 and step < args.max_steps:
-            r = evaluate_split(VLAPolicy(vla, device), meta_level["level"],
+            r = evaluate_split(VLAPolicy(vla, device), meta["level"],
                                heldout.seeds[:args.eval_episodes].tolist(), heldout.bot_lengths(),
-                               tile_size=meta_level["tile_size"])
+                               tile_size=meta["tile_size"])
             r["step"] = step
             print("eval heldout_seeds", json.dumps(r))
             log.write(json.dumps({"eval_heldout_seeds": r}) + "\n")
