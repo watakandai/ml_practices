@@ -115,9 +115,12 @@ Success rate (episode length ÷ bot length) over 500 episodes per split.
 
 | Policy | Seen seeds | Held-out seeds | Held-out color–object combos |
 |---|---|---|---|
-| BabyAI CNN+GRU+FiLM, from scratch | RESULTS_SEEN | RESULTS_SEEDS | RESULTS_COMBOS |
+| BabyAI CNN+GRU+FiLM, from scratch | 0.998 (1.05) | 0.998 (1.06) | 0.536 (3.15) |
 | SmolVLM-256M, SFT | | | |
 | SmolVLM-500M + LoRA, SFT | | | |
 | Best SFT model + RL | | | |
 
-The baseline row comes from a CPU run (15 epochs, 64 channels, 10k demos).
+The baseline row comes from a CPU run: 15 epochs, 64 channels, 10k demos, about 45 minutes, final
+training action accuracy 0.989. It generalizes across seeds but not to unseen instruction
+combinations. On held-out combos it succeeds about half the time and takes about 3× the bot's
+steps when it does. That gap is what the VLA's language pretraining should close.
