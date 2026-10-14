@@ -1,7 +1,7 @@
 """M4: supervised fine-tuning (behavior cloning) of SmolVLM into a BabyAI VLA.
 
 fp32 master weights + fp16 autocast + GradScaler (Turing GPUs such as the RTX 2070 have no bf16), SDPA attention,
-gradient accumulation to an effective batch of micro_batch * grad_accum.
+gradient accumulation to an effective batch of micro_batch * grad_accum (default 4 * 16 = 64).
 
   # SmolVLM-256M, full fine-tune
   python -m toyvla.train_vla --data data/GoToLocal --out runs/vla256/GoToLocal
@@ -59,6 +59,23 @@ def forward_backward(vla, inputs, actions, scaler, device, grad_accum=1):
     return loss.item(), acc.item()
 
 
+@torch.no_grad()
+def init_optimizer_state(opt):
+    """Allocate AdamW's moment buffers now (2x the trainable weights in fp32) instead of at the first
+    applied update. GradScaler usually skips the first updates while it lowers the loss scale, so
+    without this the memory jump, and any out-of-memory error, arrives a few steps into training.
+    The step runs at lr 0 on zero gradients, so it changes no weights."""
+    lrs = [g["lr"] for g in opt.param_groups]
+    for g in opt.param_groups:
+        g["lr"] = 0.0
+        for p in g["params"]:
+            p.grad = torch.zeros_like(p)
+    opt.step()
+    for g, lr in zip(opt.param_groups, lrs):
+        g["lr"] = lr
+    opt.zero_grad(set_to_none=True)
+
+
 def optimizer_step(vla, opt, scaler, max_grad_norm=1.0):
     scaler.unscale_(opt)
     params = [p for p in vla.model.parameters() if p.requires_grad]
@@ -79,8 +96,8 @@ def main():
     p.add_argument("--lora-rank", type=int, default=0, help="0 = full fine-tune")
     p.add_argument("--freeze-vision", action="store_true")
     p.add_argument("--grad-checkpointing", action="store_true")
-    p.add_argument("--micro-batch", type=int, default=8)
-    p.add_argument("--grad-accum", type=int, default=8)
+    p.add_argument("--micro-batch", type=int, default=4)
+    p.add_argument("--grad-accum", type=int, default=16)
     p.add_argument("--max-steps", type=int, default=2000, help="optimizer steps")
     p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument("--warmup", type=int, default=100)
@@ -120,6 +137,7 @@ def main():
     opt = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=args.weight_decay)
     sched = get_cosine_schedule_with_warmup(opt, args.warmup, args.max_steps)
     scaler = torch.amp.GradScaler("cuda", enabled=device == "cuda")
+    init_optimizer_state(opt)
     heldout = load_split(args.data, "test_seeds")
     meta = load_meta(args.data)
     log = open(os.path.join(args.out, "log.jsonl"), "a")

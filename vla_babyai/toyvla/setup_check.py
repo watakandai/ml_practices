@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from .common import NUM_ACTIONS, make_env, quiet_reset
-from .train_vla import forward_backward, optimizer_step
+from .train_vla import forward_backward, init_optimizer_state, optimizer_step
 from .vla import DEFAULT_MODEL, VLA
 
 
@@ -58,9 +58,13 @@ def main():
     opt = torch.optim.AdamW([p for p in vla.model.parameters() if p.requires_grad], lr=1e-5)
     scaler = torch.amp.GradScaler("cuda")
     weights_gb = torch.cuda.memory_allocated() / 2**30
-    print("model loaded: %.2f GB of weights; %d image tokens per frame" % (weights_gb, vla.processor.image_seq_len))
+    init_optimizer_state(opt)  # measure with AdamW's moment buffers in place, as during training
+    optim_gb = torch.cuda.memory_allocated() / 2**30 - weights_gb
+    print("model loaded: %.2f GB of weights + %.2f GB of optimizer state; %d image tokens per frame"
+          % (weights_gb, optim_gb, vla.processor.image_seq_len))
 
     results = {"gpu": props.name, "total_gb": props.total_memory / 2**30, "weights_gb": weights_gb,
+               "optimizer_gb": optim_gb,
                "config": vars(args), "steps": []}
     for bs in map(int, args.batch_sizes.split(",")):
         frames, missions, histories, actions = sample_inputs(bs, history=args.history)

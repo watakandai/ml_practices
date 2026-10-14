@@ -10,7 +10,7 @@ It implements the project plan *Toy VLA on BabyAI — Project Plan*. Milestones 
 
 | Milestone | Code | Status |
 |---|---|---|
-| M1 Setup check | `toyvla/setup_check.py` | Done on the RTX 2070: SmolVLM-256M full fine-tune peaks at 5.2 GB at micro-batch 8; 16 runs out of memory |
+| M1 Setup check | `toyvla/setup_check.py` | Ran on the RTX 2070. The first run left out AdamW's ~2 GB state, so its numbers were too low; re-run |
 | M2 Data | `toyvla/collect_demos.py`, `toyvla/data.py` | Done (GoToLocal, 10k episodes) |
 | M3 Baseline | `toyvla/baseline.py` | Done; results below (CPU run) |
 | M4 VLA SFT | `toyvla/vla.py`, `toyvla/train_vla.py` | Written and tested on a tiny random Idefics3; needs the GPU and SmolVLM weights |
@@ -113,7 +113,7 @@ the VLA.
 - **Precision and memory.**
   - fp32 master weights, fp16 autocast and `GradScaler` (Turing has no bf16).
   - SDPA attention.
-  - Micro-batch 8 × 8 accumulation steps = an effective batch of 64.
+  - Micro-batch 4 × 16 accumulation steps = an effective batch of 64.
   - `--grad-checkpointing` and `--freeze-vision` when memory is tight.
   - The training log records the count of non-finite losses and the loss scale, to catch
     fp16 overflow.

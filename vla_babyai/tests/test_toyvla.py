@@ -190,3 +190,14 @@ def test_train_vla_cli(tiny_path, data_dir, tmp_path, monkeypatch):
     results = json.load(open(out / "results.json"))
     assert set(results) == {"seen_seeds", "heldout_seeds", "heldout_combos"}
     assert os.path.exists(out / "final" / "vla_config.json")
+
+
+def test_init_optimizer_state_allocates_without_changing_weights():
+    model = torch.nn.Linear(8, 4)
+    before = [p.clone() for p in model.parameters()]
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.1)
+    train_vla.init_optimizer_state(opt)
+    assert all(torch.equal(a, b) for a, b in zip(before, model.parameters()))
+    assert all("exp_avg_sq" in opt.state[p] for p in model.parameters())
+    assert all(p.grad is None for p in model.parameters())
+    assert opt.param_groups[0]["lr"] == 1e-3
