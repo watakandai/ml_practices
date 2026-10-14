@@ -128,7 +128,7 @@ Success rate (episode length ÷ bot length) over 500 episodes per split.
 |---|---|---|---|
 | BabyAI CNN+GRU+FiLM, from scratch | 0.998 (1.05) | 0.998 (1.06) | 0.536 (3.15) |
 | SmolVLM-256M, SFT | 0.992 (1.05) | 0.992 (1.06) | 0.652 (4.96) |
-| SmolVLM-500M + LoRA, SFT | | | |
+| SmolVLM-500M + LoRA, SFT | 0.980 (1.26) | 0.962 (1.28) | 0.680 (4.45) |
 | Best SFT model + RL | | | |
 
 The baseline row comes from a CPU run: 15 epochs, 64 channels, 10k demos, about 45 minutes, final
@@ -143,6 +143,13 @@ and action accuracy 0.983. On held-out combos it succeeds more often than the ba
 bot's steps when it does, so part of that success comes from wandering until it happens to
 face the right object rather than heading straight for it. Both models are at about 99% on
 seeds they did not train on.
+
+The SmolVLM-500M + LoRA row: rank 16, lr 2e-4, otherwise the same settings. Its 68.0% on held-out
+combos is not clearly better than 256M's 65.2%: the gap is about one standard error of the
+difference (±3 points). It is clearly worse on seeds it trained on or that are held out (about
+97% vs 99%) and takes about 1.3× the bot's steps there instead of 1.05×. So LoRA at this rank
+and learning rate fits the training distribution less closely than full fine-tuning of the
+smaller model.
 
 ## Rollouts
 
