@@ -201,3 +201,26 @@ def test_init_optimizer_state_allocates_without_changing_weights():
     assert all("exp_avg_sq" in opt.state[p] for p in model.parameters())
     assert all(p.grad is None for p in model.parameters())
     assert opt.param_groups[0]["lr"] == 1e-3
+
+
+def test_train_vla_resumes_from_checkpoint(tiny_path, data_dir, tmp_path, monkeypatch):
+    out = tmp_path / "run"
+    os.makedirs(out)
+    vla = VLA.from_pretrained(tiny_path, image_size=64)
+    opt = torch.optim.AdamW(vla.model.parameters(), lr=1e-4)
+    sched = train_vla.get_cosine_schedule_with_warmup(opt, 1, 4)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    train_vla.init_optimizer_state(opt)
+    for _ in range(3):
+        opt.step()
+        sched.step()
+    train_vla.save_checkpoint(str(out / "last.pt"), 3, vla, opt, sched, scaler)
+
+    monkeypatch.setattr(sys, "argv", [
+        "train_vla", "--model", tiny_path, "--data", data_dir, "--out", str(out), "--image-size", "64",
+        "--micro-batch", "2", "--grad-accum", "1", "--max-steps", "4", "--warmup", "1", "--log-every", "1",
+        "--eval-every", "0", "--final-eval-episodes", "1", "--workers", "0", "--resume"])
+    train_vla.main()
+    steps = [json.loads(line)["step"] for line in open(out / "log.jsonl") if '"step"' in line]
+    assert steps == [4]  # steps 1-3 came from the checkpoint
+    assert not os.path.exists(out / "last.pt")

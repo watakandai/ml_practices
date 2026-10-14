@@ -86,6 +86,24 @@ def optimizer_step(vla, opt, scaler, max_grad_norm=1.0):
     return grad_norm.item()
 
 
+def save_checkpoint(path, step, vla, opt, sched, scaler):
+    """Everything needed to resume: weights, AdamW moments, LR schedule and loss scale (~3 GB for
+    the 256M model). Written to a temp file first so a crash mid-write keeps the previous one."""
+    tmp = path + ".tmp"
+    torch.save({"step": step, "model": vla.model.state_dict(), "opt": opt.state_dict(),
+                "sched": sched.state_dict(), "scaler": scaler.state_dict()}, tmp)
+    os.replace(tmp, path)
+
+
+def load_checkpoint(path, vla, opt, sched, scaler, device):
+    state = torch.load(path, map_location=device, weights_only=False)
+    vla.model.load_state_dict(state["model"])
+    opt.load_state_dict(state["opt"])
+    sched.load_state_dict(state["sched"])
+    scaler.load_state_dict(state["scaler"])
+    return state["step"]
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", default=DEFAULT_MODEL)
@@ -106,6 +124,9 @@ def main():
     p.add_argument("--eval-every", type=int, default=500, help="optimizer steps; 0 disables")
     p.add_argument("--eval-episodes", type=int, default=100, help="held-out seeds during training")
     p.add_argument("--final-eval-episodes", type=int, default=500, help="per split, after training")
+    p.add_argument("--save-every", type=int, default=100,
+                   help="optimizer steps between resumable checkpoints (out/last.pt); 0 disables")
+    p.add_argument("--resume", action="store_true", help="continue from out/last.pt if it exists")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
@@ -141,10 +162,16 @@ def main():
     heldout = load_split(args.data, "test_seeds")
     meta = load_meta(args.data)
     log = open(os.path.join(args.out, "log.jsonl"), "a")
+    ckpt_path = os.path.join(args.out, "last.pt")
+    start = 1
+    if args.resume and os.path.exists(ckpt_path):
+        start = load_checkpoint(ckpt_path, vla, opt, sched, scaler, device) + 1
+        print("resumed from %s at step %d" % (ckpt_path, start))
+        torch.manual_seed(args.seed + start)  # fresh data order for the remaining steps
 
     vla.model.train()
     t0, losses, accs, nonfinite = time.time(), [], [], 0
-    for step in range(1, args.max_steps + 1):
+    for step in range(start, args.max_steps + 1):
         for _ in range(args.grad_accum):
             inputs, actions = next(batches)
             loss, acc = forward_backward(vla, inputs, actions, scaler, device, args.grad_accum)
@@ -174,10 +201,16 @@ def main():
             r["step"] = step
             print("eval heldout_seeds", json.dumps(r))
             log.write(json.dumps({"eval_heldout_seeds": r}) + "\n")
+            log.flush()
             vla.model.train()
+
+        if args.save_every and step % args.save_every == 0 and step < args.max_steps:
+            save_checkpoint(ckpt_path, step, vla, opt, sched, scaler)
 
     final = os.path.join(args.out, "final")
     vla.save(final)
+    if os.path.exists(ckpt_path):
+        os.remove(ckpt_path)  # the final model supersedes it
     print("saved %s; evaluating" % final)
     if args.lora_rank:  # save() merged the adapters; reload the plain model for evaluation
         policy = VLAPolicy.load(final, device)
