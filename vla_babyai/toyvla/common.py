@@ -25,13 +25,14 @@ TRAIN_SEED_START = 0
 TEST_SEED_START = 10_000_000
 
 
-def make_env(level, tile_size=8):
-    """BabyAI level with an egocentric RGB view of the 7x7 field of view (7 * tile_size pixels square)."""
+def make_env(level, tile_size=8, render_mode=None):
+    """BabyAI level with an egocentric RGB view of the 7x7 field of view (7 * tile_size pixels square).
+    render_mode="rgb_array" additionally lets env.render() draw the full top-down grid."""
     if not level.startswith("BabyAI-"):
         level = "BabyAI-%s" % level
     if not level.endswith("-v0"):
         level = "%s-v0" % level
-    return RGBImgPartialObsWrapper(gym.make(level), tile_size=tile_size)
+    return RGBImgPartialObsWrapper(gym.make(level, render_mode=render_mode), tile_size=tile_size)
 
 
 def quiet_reset(env, seed):

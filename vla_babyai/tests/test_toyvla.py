@@ -224,3 +224,19 @@ def test_train_vla_resumes_from_checkpoint(tiny_path, data_dir, tmp_path, monkey
     steps = [json.loads(line)["step"] for line in open(out / "log.jsonl") if '"step"' in line]
     assert steps == [4]  # steps 1-3 came from the checkpoint
     assert not os.path.exists(out / "last.pt")
+
+
+def test_diagnose_bot_replay_and_render(data_dir, tmp_path):
+    from toyvla import diagnose, render
+    data = load_split(data_dir, "test_combos")
+    records = diagnose.run(diagnose.ReplayPolicy(data), LEVEL, 8, data.seeds.tolist(), data.bot_lengths(), 3)
+    s = diagnose.summarize(records)
+    assert s["success_rate"] == 1.0 and s["length_ratio_successes"]["mean"] == 1.0
+    assert all(r["faced"][-1] == "%s %s" % tuple(r["target"]) for r in records if r["target"][0])
+    assert all(len(r["wrong"]) == len(r["faced"]) - 1 for r in records)
+
+    env = make_env(LEVEL, 8, render_mode="rgb_array")
+    frames, success = render.rollout(diagnose.ReplayPolicy(data), env, int(data.seeds[0]), int(data.lengths[0]))
+    assert success and len(frames) == data.lengths[0] + 1
+    render.save_gif(frames, str(tmp_path / "ep.gif"))
+    assert os.path.getsize(tmp_path / "ep.gif") > 0

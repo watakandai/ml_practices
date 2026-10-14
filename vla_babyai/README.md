@@ -143,3 +143,61 @@ and action accuracy 0.983. On held-out combos it succeeds more often than the ba
 bot's steps when it does, so part of that success comes from wandering until it happens to
 face the right object rather than heading straight for it. Both models are at about 99% on
 seeds they did not train on.
+
+## Rollouts
+
+`toyvla.render` writes one GIF per episode. Each shows the top-down level, with the agent's
+field of view highlighted, next to the 56×56 frame the policy actually receives. The mission
+is at the top, the chosen action at the bottom, and the last frame states the outcome and the
+bot's step count for the same seed.
+
+```bash
+python -m toyvla.render --policy vla --ckpt runs/vla256/GoToLocal/final --split heldout_combos --episodes 4
+python -m toyvla.render --policy vla --ckpt runs/vla256/GoToLocal/final --split heldout_combos --select fail
+```
+
+The baseline on held-out color–object combos (GIFs written to `media/<policy>_<level>/`):
+
+| "go to a blue box": success, 7 steps vs the bot's 3 | A failure: timeout after 64 steps |
+|---|---|
+| ![baseline success](media/baseline_GoToLocal/heldout_combos_seed10000004_success.gif) | ![baseline failure](media/baseline_GoToLocal/heldout_combos_seed10000000_fail.gif) |
+
+## Diagnosing the wandering
+
+`toyvla.diagnose` replays each evaluation episode and records every object the agent faces.
+A GoTo episode ends in success the moment the agent faces a matching object; facing any other
+object does nothing. Each wrong object faced is classed by its relation to the instruction:
+same color, same type, or neither. `--policy bot` replays the recorded demos as the reference.
+Even the bot faces a non-target object before its target in about 30% of episodes, because it
+turns past objects on the way.
+
+```bash
+python -m toyvla.diagnose --policy bot
+python -m toyvla.diagnose --policy baseline --ckpt runs/baseline/GoToLocal/model.pt
+python -m toyvla.diagnose --policy vla --ckpt runs/vla256/GoToLocal/final
+```
+
+Results on GoToLocal, 500 episodes per split:
+
+| | Bot | Baseline, held-out seeds | Baseline, held-out combos | SmolVLM-256M, held-out combos |
+|---|---|---|---|---|
+| Success | 100% | 100% | 54% | |
+| Successes with no wrong object faced first | 68% | 69% | 49% | |
+| Wrong objects faced per success | 0.41 | 0.39 | 0.94 | |
+| Success, target in view at start / hidden | 100% / 100% | 100% / 100% | 58% / 49% | |
+| Wrong objects with the same type / color | 35% / 10% | 32% / 14% | 41% / 12% | |
+
+The bot column is on held-out combos (held-out seeds: 70% direct, 0.37 wrong objects per success).
+
+The baseline behaves like the bot on held-out seeds but not on held-out combos. There it faces
+more than twice as many wrong objects per success, and only 58% of the episodes whose target
+is visible from the start succeed. That points to a grounding failure on the unseen
+instruction rather than a lack of exploration. Success also varies sharply by target:
+
+| Held-out combo | Episodes | Baseline success |
+|---|---|---|
+| yellow ball | 127 | 89% |
+| blue box | 126 | 67% |
+| green key | 116 | 29% |
+| red ball | 131 | 28% |
+
