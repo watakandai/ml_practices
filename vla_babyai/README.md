@@ -3,7 +3,7 @@
 This project fine-tunes a small pretrained vision-language model (SmolVLM) into a
 vision-language-action (VLA) policy for BabyAI. The policy reads the egocentric RGB frame,
 the mission string and its recent actions, then emits one of MiniGrid's 7 action words.
-The recipe follows RT-2 and OpenVLA at toy scale and is sized for a single RTX 2080
+The recipe follows RT-2 and OpenVLA at toy scale and is sized for a single RTX 2070
 (8 GB, no bf16, no FlashAttention-2).
 
 It implements the project plan *Toy VLA on BabyAI — Project Plan*. Milestones and status:
@@ -22,7 +22,7 @@ It implements the project plan *Toy VLA on BabyAI — Project Plan*. Milestones 
 
 ```bash
 cd vla_babyai
-pip install -r requirements.txt   # use a CUDA build of torch on the 2080
+pip install -r requirements.txt   # use a CUDA build of torch on the 2070
 pytest tests                      # ~2 min on CPU; builds a tiny random SmolVLM-architecture model offline
 ```
 

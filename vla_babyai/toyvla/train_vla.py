@@ -1,6 +1,6 @@
 """M4: supervised fine-tuning (behavior cloning) of SmolVLM into a BabyAI VLA.
 
-fp32 master weights + fp16 autocast + GradScaler (the RTX 2080 has no bf16), SDPA attention,
+fp32 master weights + fp16 autocast + GradScaler (Turing GPUs such as the RTX 2070 have no bf16), SDPA attention,
 gradient accumulation to an effective batch of micro_batch * grad_accum.
 
   # SmolVLM-256M, full fine-tune
