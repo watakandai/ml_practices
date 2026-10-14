@@ -20,16 +20,27 @@ It implements the project plan *Toy VLA on BabyAI — Project Plan*. Milestones 
 
 ## Setup
 
+The project is managed with [uv](https://docs.astral.sh/uv/):
+
 ```bash
 cd vla_babyai
-pip install -r requirements.txt   # use a CUDA build of torch on the 2070
-pytest tests                      # ~2 min on CPU; builds a tiny random SmolVLM-architecture model offline
+uv sync                                                    # creates .venv; torch from PyTorch's cu126 index
+uv run python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"  # expect True 12.6
+uv run pytest                                              # ~1 min; builds a tiny random SmolVLM-architecture model offline
+git add uv.lock                                            # commit the lock produced on the GPU machine
 ```
 
-Run every command from `vla_babyai/`. Data goes to `data/` and checkpoints to `runs/`;
+`pyproject.toml` pulls torch and torchvision from the CUDA 12.6 wheel index on Linux. The
+default PyPI torch is a CUDA 13 build, and the 2070's driver 535 (CUDA 12.2) cannot run CUDA 13.
+CUDA 12.x wheels do run on it, through minor-version compatibility. After a driver upgrade to
+570 or newer, switching the index URL to `cu128` also works.
+
+Run every command from `vla_babyai/`, prefixed with `uv run` (e.g. `uv run python -m toyvla.collect_demos`). Data goes to `data/` and checkpoints to `runs/`;
 both are git-ignored.
 
 ## Pipeline
+
+Commands below are shown without the `uv run` prefix.
 
 ```bash
 # M1: GPU info, then peak VRAM of one real training step at micro-batch 1, 2, 4, ... until OOM
