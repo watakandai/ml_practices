@@ -10,10 +10,10 @@ It implements the project plan *Toy VLA on BabyAI — Project Plan*. Milestones 
 
 | Milestone | Code | Status |
 |---|---|---|
-| M1 Setup check | `toyvla/setup_check.py` | Ran on the RTX 2070. The first run left out AdamW's ~2 GB state, so its numbers were too low; re-run |
+| M1 Setup check | `toyvla/setup_check.py` | Done on the RTX 2070: full fine-tune of SmolVLM-256M at micro-batch 4 peaks at 6.2 GB |
 | M2 Data | `toyvla/collect_demos.py`, `toyvla/data.py` | Done (GoToLocal, 10k episodes) |
 | M3 Baseline | `toyvla/baseline.py` | Done; results below (CPU run) |
-| M4 VLA SFT | `toyvla/vla.py`, `toyvla/train_vla.py` | Written and tested on a tiny random Idefics3; needs the GPU and SmolVLM weights |
+| M4 VLA SFT | `toyvla/vla.py`, `toyvla/train_vla.py` | SmolVLM-256M done on the RTX 2070; results below |
 | M5 Ablations | `--history`, `--image-size` flags on `train_vla` | Knobs in place |
 | M6 Harder levels | `--level PickupLoc` / `GoToSeq` on every script | Knobs in place |
 | M7 RL fine-tuning | — | Not started |
@@ -127,7 +127,7 @@ Success rate (episode length ÷ bot length) over 500 episodes per split.
 | Policy | Seen seeds | Held-out seeds | Held-out color–object combos |
 |---|---|---|---|
 | BabyAI CNN+GRU+FiLM, from scratch | 0.998 (1.05) | 0.998 (1.06) | 0.536 (3.15) |
-| SmolVLM-256M, SFT | | | |
+| SmolVLM-256M, SFT | 0.992 (1.05) | 0.992 (1.06) | 0.652 (4.96) |
 | SmolVLM-500M + LoRA, SFT | | | |
 | Best SFT model + RL | | | |
 
@@ -135,3 +135,11 @@ The baseline row comes from a CPU run: 15 epochs, 64 channels, 10k demos, about 
 training action accuracy 0.989. It generalizes across seeds but not to unseen instruction
 combinations. On held-out combos it succeeds about half the time and takes about 3× the bot's
 steps when it does. That gap is what the VLA's language pretraining should close.
+
+The SmolVLM-256M row: 2000 updates at an effective batch of 64 (about 2.4 epochs), on the
+RTX 2070 in 2 h 7 min, peak VRAM 6.2 GB, with no fp16 overflow. Final training loss was 0.058
+and action accuracy 0.983. On held-out combos it succeeds more often than the baseline
+(65.2% vs 53.6%; about ±2 points of standard error at 500 episodes). But it takes about 5× the
+bot's steps when it does, so part of that success comes from wandering until it happens to
+face the right object rather than heading straight for it. Both models are at about 99% on
+seeds they did not train on.
