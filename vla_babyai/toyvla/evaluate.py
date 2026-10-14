@@ -98,6 +98,8 @@ def main():
     p.add_argument("--batch-size", type=int, default=32, help="environments run in parallel")
     p.add_argument("--out", help="write results JSON here")
     args = p.parse_args()
+    if args.out:  # create the output directory up front, before any slow work
+        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     policy = load_policy(args.policy, args.ckpt, device)

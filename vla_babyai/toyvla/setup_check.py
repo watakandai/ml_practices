@@ -8,6 +8,7 @@ SDPA attention), with random BabyAI frames, and stops at the first out-of-memory
 """
 import argparse
 import json
+import os
 
 import numpy as np
 import torch
@@ -40,6 +41,8 @@ def main():
     p.add_argument("--batch-sizes", default="1,2,4,8,16,32")
     p.add_argument("--out", help="write the measurements as JSON here")
     args = p.parse_args()
+    if args.out:  # create the output directory up front, before any slow work
+        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
     if not torch.cuda.is_available():
         raise SystemExit("No CUDA device found; M1 measures GPU memory.")
