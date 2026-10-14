@@ -11,29 +11,33 @@ import os
 
 import numpy as np
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw  # ImageDraw writes text onto an image
 
 from .common import ACTION_NAMES, make_env, quiet_reset
 from .data import load_meta, load_split
 from .evaluate import EVAL_SPLITS, load_policy
 
+# Layout in pixels: text bar above, text bar below, gap between the two pictures, and the
+# factor by which the 56x56 agent view is enlarged.
 HEADER, FOOTER, GAP, EGO_SCALE = 34, 22, 8, 3
+# RGB colors for the text.
 GREEN, RED, WHITE, GREY = (80, 200, 120), (230, 80, 80), (235, 235, 235), (150, 150, 150)
 
 
 def compose(grid, ego, mission, caption, banner=None):
     """One GIF frame: header with the mission, top-down grid | upscaled egocentric view, footer."""
+    # Enlarge the agent's 56x56 view 3x; nearest-neighbour keeps the pixels blocky and sharp.
     ego = np.asarray(Image.fromarray(ego).resize((ego.shape[1] * EGO_SCALE, ego.shape[0] * EGO_SCALE), Image.NEAREST))
-    w = grid.shape[1] + GAP + ego.shape[1]
+    w = grid.shape[1] + GAP + ego.shape[1]  # canvas width: both pictures side by side
     h = HEADER + max(grid.shape[0], ego.shape[0]) + FOOTER
-    img = Image.new("RGB", (w, h), (24, 24, 24))
-    img.paste(Image.fromarray(grid), (0, HEADER))
+    img = Image.new("RGB", (w, h), (24, 24, 24))  # dark grey canvas
+    img.paste(Image.fromarray(grid), (0, HEADER))  # paste(image, (x, y)): top-left corner position
     img.paste(Image.fromarray(ego), (grid.shape[1] + GAP, HEADER))
     d = ImageDraw.Draw(img)
     d.text((6, 4), mission, fill=WHITE)
     d.text((grid.shape[1] + GAP, HEADER - 14), "agent's view", fill=GREY)
     d.text((6, h - FOOTER + 5), caption, fill=WHITE)
-    if banner:
+    if banner:  # the final frame's outcome line
         text, color = banner
         d.text((6, 18), text, fill=color)
     return img
@@ -43,10 +47,11 @@ def compose(grid, ego, mission, caption, banner=None):
 def rollout(policy, env, seed, bot_len):
     obs, _ = quiet_reset(env, seed)
     mission = obs["mission"]
-    policy.reset([mission])
+    policy.reset([mission])  # a batch of one episode
     frames, t = [], 0
     while True:
-        grid = env.render()
+        grid = env.render()  # top-down picture of the whole level (needs render_mode="rgb_array")
+        # [None] adds a batch axis: one image -> a batch of 1. [0] = this episode's index.
         action = int(policy.act(obs["image"][None], [0])[0])
         frames.append(compose(grid, obs["image"], mission, "step %d   action: %s" % (t, ACTION_NAMES[action])))
         obs, reward, terminated, truncated, _ = env.step(action)
@@ -54,14 +59,19 @@ def rollout(policy, env, seed, bot_len):
         if terminated or truncated:
             break
     success = reward > 0
+    # (text, color) for the banner on the final frame.
     result = ("SUCCESS in %d steps (bot: %d)" % (t, bot_len) if success
               else "FAILED after %d steps (bot: %d)" % (t, bot_len), GREEN if success else RED)
+    # One extra frame showing where the agent ended up.
     frames.append(compose(env.render(), obs["image"], mission, "step %d   done" % t, banner=result))
     return frames, success
 
 
 def save_gif(frames, path, ms_per_step=300, hold_last=8):
+    # Repeat the last frame so the outcome stays on screen before the GIF loops.
     frames = frames + [frames[-1]] * hold_last
+    # PIL writes an animated GIF from the first frame plus append_images.
+    # duration = milliseconds per frame; loop=0 = repeat forever.
     frames[0].save(path, save_all=True, append_images=frames[1:], duration=ms_per_step, loop=0, optimize=True)
 
 
@@ -83,13 +93,14 @@ def main():
     os.makedirs(out, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     policy = load_policy(args.policy, args.ckpt, device)
-    data = load_split(args.data, EVAL_SPLITS[args.split])
+    data = load_split(args.data, EVAL_SPLITS[args.split])  # e.g. "heldout_combos" -> test_combos.npz
     bot_lengths = data.bot_lengths()
     env = make_env(meta["level"], meta["tile_size"], render_mode="rgb_array")
 
     written = 0
-    for seed in data.seeds[:50].tolist():
+    for seed in data.seeds[:50].tolist():  # try at most 50 seeds
         frames, success = rollout(policy, env, seed, bot_lengths[seed])
+        # Skip episodes that don't match --select.
         if args.select == "success" and not success or args.select == "fail" and success:
             continue
         path = os.path.join(out, "%s_seed%d_%s.gif" % (args.split, seed, "success" if success else "fail"))

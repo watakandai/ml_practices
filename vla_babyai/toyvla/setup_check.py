@@ -14,19 +14,24 @@ import numpy as np
 import torch
 
 from .common import NUM_ACTIONS, make_env, quiet_reset
+# Reuse the exact training-step code, so the memory measured here is what training will use.
 from .train_vla import forward_backward, init_optimizer_state, optimizer_step
 from .vla import DEFAULT_MODEL, VLA
 
 
 def sample_inputs(n, level="GoToLocal", history=4, seed=0):
+    """n real BabyAI frames and missions with random action histories and targets.
+
+    The values don't matter for a memory test; only the shapes (sequence length, image size) do.
+    """
     env = make_env(level)
     rng = np.random.default_rng(seed)
     frames, missions, histories = [], [], []
     for i in range(n):
-        obs, _ = quiet_reset(env, seed + i)
+        obs, _ = quiet_reset(env, seed + i)  # a different level per example
         frames.append(obs["image"])
         missions.append(obs["mission"])
-        histories.append(rng.integers(0, NUM_ACTIONS, history).tolist())
+        histories.append(rng.integers(0, NUM_ACTIONS, history).tolist())  # random past actions
     return np.stack(frames), missions, histories, torch.from_numpy(rng.integers(0, NUM_ACTIONS, n))
 
 
@@ -42,11 +47,13 @@ def main():
     p.add_argument("--out", help="write the measurements as JSON here")
     args = p.parse_args()
     if args.out:  # create the output directory up front, before any slow work
+        # dirname("runs/m1.json") is "runs"; for a bare file name it is "", hence the `or "."`.
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
     if not torch.cuda.is_available():
         raise SystemExit("No CUDA device found; M1 measures GPU memory.")
-    props = torch.cuda.get_device_properties(0)
+    props = torch.cuda.get_device_properties(0)  # GPU 0's name, memory, architecture
+    # Compute capability 7.5 = Turing (RTX 20xx). bf16 needs 8.0+ (Ampere), hence fp16 here.
     print("GPU: %s, %.1f GB, compute capability %d.%d, bf16 supported: %s"
           % (props.name, props.total_memory / 2**30, props.major, props.minor, torch.cuda.is_bf16_supported()))
 
@@ -57,26 +64,30 @@ def main():
         vla.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     opt = torch.optim.AdamW([p for p in vla.model.parameters() if p.requires_grad], lr=1e-5)
     scaler = torch.amp.GradScaler("cuda")
+    # memory_allocated() = bytes PyTorch currently holds on the GPU; right now, just the weights.
     weights_gb = torch.cuda.memory_allocated() / 2**30
     init_optimizer_state(opt)  # measure with AdamW's moment buffers in place, as during training
-    optim_gb = torch.cuda.memory_allocated() / 2**30 - weights_gb
+    optim_gb = torch.cuda.memory_allocated() / 2**30 - weights_gb  # what the optimizer added
     print("model loaded: %.2f GB of weights + %.2f GB of optimizer state; %d image tokens per frame"
           % (weights_gb, optim_gb, vla.processor.image_seq_len))
 
     results = {"gpu": props.name, "total_gb": props.total_memory / 2**30, "weights_gb": weights_gb,
                "optimizer_gb": optim_gb,
                "config": vars(args), "steps": []}
-    for bs in map(int, args.batch_sizes.split(",")):
+    for bs in map(int, args.batch_sizes.split(",")):  # "1,2,4" -> 1, 2, 4
         frames, missions, histories, actions = sample_inputs(bs, history=args.history)
         inputs = vla.encode(frames, missions, histories)
+        # Reset the high-water mark so the peak below belongs to this batch size alone.
         torch.cuda.reset_peak_memory_stats()
         try:
             loss, _ = forward_backward(vla, inputs, actions, scaler, "cuda")
             optimizer_step(vla, opt, scaler)
         except torch.cuda.OutOfMemoryError:
+            # Larger batches would also fail, so stop here.
             print("batch %2d: out of memory" % bs)
             results["steps"].append({"batch": bs, "oom": True})
             break
+        # The most memory held at any moment during that step: activations, gradients and all.
         peak = torch.cuda.max_memory_allocated() / 2**30
         print("batch %2d: seq len %d, loss %.3f, peak VRAM %.2f GB" % (bs, inputs["input_ids"].shape[1], loss, peak))
         results["steps"].append({"batch": bs, "seq_len": inputs["input_ids"].shape[1], "loss": loss, "peak_gb": peak})
