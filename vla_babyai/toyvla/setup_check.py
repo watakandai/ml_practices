@@ -18,6 +18,7 @@ from .common import NUM_ACTIONS, make_env, quiet_reset
 from .train_vla import forward_backward, init_optimizer_state, optimizer_step
 from .vla import DEFAULT_MODEL, VLA
 
+BYTES_PER_GIGABYTE = 2**30
 
 def sample_inputs(n, level="GoToLocal", history=4, seed=0):
     """n real BabyAI frames and missions with random action histories and targets.
@@ -65,13 +66,13 @@ def main():
     opt = torch.optim.AdamW([p for p in vla.model.parameters() if p.requires_grad], lr=1e-5)
     scaler = torch.amp.GradScaler("cuda")
     # memory_allocated() = bytes PyTorch currently holds on the GPU; right now, just the weights.
-    weights_gb = torch.cuda.memory_allocated() / 2**30
+    weights_gb = torch.cuda.memory_allocated() / BYTES_PER_GIGABYTE
     init_optimizer_state(opt)  # measure with AdamW's moment buffers in place, as during training
-    optim_gb = torch.cuda.memory_allocated() / 2**30 - weights_gb  # what the optimizer added
+    optim_gb = torch.cuda.memory_allocated() / BYTES_PER_GIGABYTE - weights_gb  # what the optimizer added
     print("model loaded: %.2f GB of weights + %.2f GB of optimizer state; %d image tokens per frame"
           % (weights_gb, optim_gb, vla.processor.image_seq_len))
 
-    results = {"gpu": props.name, "total_gb": props.total_memory / 2**30, "weights_gb": weights_gb,
+    results = {"gpu": props.name, "total_gb": props.total_memory / BYTES_PER_GIGABYTE, "weights_gb": weights_gb,
                "optimizer_gb": optim_gb,
                "config": vars(args), "steps": []}
     for bs in map(int, args.batch_sizes.split(",")):  # "1,2,4" -> 1, 2, 4
