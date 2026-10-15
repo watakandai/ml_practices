@@ -182,29 +182,54 @@ turns past objects on the way.
 python -m toyvla.diagnose --policy bot
 python -m toyvla.diagnose --policy baseline --ckpt runs/baseline/GoToLocal/model.pt
 python -m toyvla.diagnose --policy vla --ckpt runs/vla256/GoToLocal/final
+python -m toyvla.diagnose --policy vla --ckpt runs/vla256/GoToLocal/final --shuffle-missions
 ```
 
-Results on GoToLocal, 500 episodes per split:
+Results on held-out color–object combos, 500 episodes. "Solved directly" is the success
+rate times the share of successes with no wrong object faced first.
 
-| | Bot | Baseline, held-out seeds | Baseline, held-out combos | SmolVLM-256M, held-out combos |
-|---|---|---|---|---|
-| Success | 100% | 100% | 54% | |
-| Successes with no wrong object faced first | 68% | 69% | 49% | |
-| Wrong objects faced per success | 0.41 | 0.39 | 0.94 | |
-| Success, target in view at start / hidden | 100% / 100% | 100% / 100% | 58% / 49% | |
-| Wrong objects with the same type / color | 35% / 10% | 32% / 14% | 41% / 12% | |
+| | Bot | Baseline | SmolVLM-256M |
+|---|---|---|---|
+| Success | 100% | 54% | 65% |
+| Successes with no wrong object faced first | 68% | 49% | 27% |
+| Episodes solved directly | 68% | 26% | 18% |
+| Wrong objects faced per success | 0.41 | 0.94 | 1.94 |
+| Wrong objects faced per failure | — | 3.19 | 6.82 |
+| Failures that never faced an object | — | 20% | 5% |
+| Success, target in view at start / hidden | 100% / 100% | 58% / 49% | 68% / 62% |
+| Wrong objects with the target's color / type | 10% / 35% | 12% / 41% | 24% / 26% |
 
-The bot column is on held-out combos (held-out seeds: 70% direct, 0.37 wrong objects per success).
+On held-out seeds both models look like the bot: about 68–69% of successes are direct, with
+about 0.4 wrong objects per success.
 
-The baseline behaves like the bot on held-out seeds but not on held-out combos. There it faces
-more than twice as many wrong objects per success, and only 58% of the episodes whose target
-is visible from the start succeed. That points to a grounding failure on the unseen
-instruction rather than a lack of exploration. Success also varies sharply by target:
+The VLA's higher success on unseen instructions comes from persistence, not better
+grounding. It solves fewer episodes directly than the baseline (18% vs 26%). Instead it keeps
+visiting objects until it faces a match, while the baseline more often gets stuck. The
+wrong objects it visits share the instruction's color twice as often as the bot's (24% vs
+10%), so it picks up the color word but not the object type.
 
-| Held-out combo | Episodes | Baseline success |
+**Language ablation** (`--shuffle-missions`). Each policy is given another episode's
+mission, while the environment still rewards the true one. The table shows success on
+episodes whose given mission names a different target:
+
+| | True mission | Another target's mission |
 |---|---|---|
-| yellow ball | 127 | 89% |
-| blue box | 126 | 67% |
-| green key | 116 | 29% |
-| red ball | 131 | 28% |
+| Baseline, held-out seeds | 100% | 25% |
+| Baseline, held-out combos | 54% | 36% |
+| SmolVLM-256M, held-out seeds | 99% | |
+| SmolVLM-256M, held-out combos | 65% | |
+
+On held-out seeds, whose instructions use combinations seen in training, the baseline clearly
+follows the instruction. On held-out combos,
+36 of its 54 points survive a wrong instruction, so they come from roaming into the target
+rather than from reading the mission.
+
+Success on held-out combos by target:
+
+| Held-out combo | Episodes | Baseline success | SmolVLM-256M success |
+|---|---|---|---|
+| yellow ball | 127 | 89% | 59% |
+| blue box | 126 | 67% | 79% |
+| green key | 116 | 29% | 67% |
+| red ball | 131 | 28% | 56% |
 

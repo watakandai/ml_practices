@@ -240,3 +240,19 @@ def test_diagnose_bot_replay_and_render(data_dir, tmp_path):
     assert success and len(frames) == data.lengths[0] + 1
     render.save_gif(frames, str(tmp_path / "ep.gif"))
     assert os.path.getsize(tmp_path / "ep.gif") > 0
+
+
+def test_diagnose_shuffle_missions(data_dir):
+    from toyvla import diagnose
+    data = load_split(data_dir, "test_seeds")
+
+    class Recorder(diagnose.ReplayPolicy):
+        def reset(self, missions):
+            self.given = list(missions)
+            super().reset(missions)
+
+    policy = Recorder(data)
+    records = diagnose.run(policy, LEVEL, 8, data.seeds.tolist(), data.bot_lengths(), 4, shuffle_missions=True)
+    assert [r["given_mission"] for r in records[-len(policy.given):]] == policy.given
+    assert any(r["given_mission"] != r["mission"] for r in records)
+    assert all(r["success"] for r in records)  # replayed bot actions don't depend on the mission

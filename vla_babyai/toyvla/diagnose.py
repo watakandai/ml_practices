@@ -12,6 +12,7 @@ to the instruction (same color, same type, or neither). The summary separates:
   python -m toyvla.diagnose --policy vla --ckpt runs/vla256/GoToLocal/final
   python -m toyvla.diagnose --policy baseline --ckpt runs/baseline/GoToLocal/model.pt
   python -m toyvla.diagnose --policy bot    # reference: the bot's own demos
+  python -m toyvla.diagnose --policy vla --ckpt runs/vla256/GoToLocal/final --shuffle-missions
 
 Writes <out>/<split>_episodes.jsonl and <out>/<split>_summary.json.
 """
@@ -23,7 +24,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 
-from .common import make_env, quiet_reset
+from .common import make_env, mission_combos, quiet_reset
 from .data import load_meta, load_split
 from .evaluate import EVAL_SPLITS, load_policy
 
@@ -51,7 +52,7 @@ def relation(obj, desc):
 
 
 @torch.no_grad()
-def run(policy, level, tile_size, seeds, bot_lengths, batch_size=32):
+def run(policy, level, tile_size, seeds, bot_lengths, batch_size=32, shuffle_missions=False):
     """Roll out the policy on each seed and return one record (dict) per episode.
 
     The batching works like evaluate.run_episodes, with extra bookkeeping at every step.
@@ -75,7 +76,18 @@ def run(policy, level, tile_size, seeds, bot_lengths, batch_size=32):
                 # wrong: how each non-final faced object relates to the target.
                 "faced": [], "wrong": [], "steps": 0, "success": False,
             })
-        policy.reset([o["mission"] for o in obs])
+        missions = [o["mission"] for o in obs]
+        if shuffle_missions and len(missions) > 1:
+            # Language ablation: each policy is told the NEXT episode's mission (rotate by one),
+            # while the environment still rewards the true one. A policy that ignores the
+            # instruction scores about the same as without shuffling.
+            missions = missions[1:] + missions[:1]
+        for r, given in zip(recs, missions):
+            r["given_mission"] = given
+            # The rotated mission can name the same target by chance; those episodes are not
+            # a real test of whether the policy reads the instruction.
+            r["given_same_target"] = mission_combos(given) == mission_combos(r["mission"])
+        policy.reset(missions)
         running = list(range(len(chunk)))
         while running:
             actions = policy.act(np.stack([obs[i]["image"] for i in running]), running)
@@ -168,6 +180,8 @@ def summarize(records):
         # Share of wrong objects that had the target's color, its type, or neither.
         "wrong_object_relation": {k: wrong.count(k) / len(wrong) for k in ("same_color", "same_type", "neither")}
         if wrong else {},
+        # With --shuffle-missions: success on episodes whose given mission names another target.
+        "success_rate_given_other_target": rate([r["success"] for r in records if not r["given_same_target"]]),
         "success_rate_by_target": {k: {"episodes": len(v), "success_rate": rate(v)} for k, v in sorted(by_target.items())},
     }
 
@@ -187,6 +201,9 @@ def print_summary(s):
     if s["wrong_object_relation"]:
         print("  wrong objects share the instruction's: " + ", ".join(
             "%s %s" % (k.replace("_", " "), pct(v)) for k, v in s["wrong_object_relation"].items()))
+    if s["success_rate_given_other_target"] != s["success_rate"]:
+        print("  success when the policy was given another target's mission: %s"
+              % pct(s["success_rate_given_other_target"]))
     print("  success by target: " + ", ".join(
         "%s %s (%d)" % (k, pct(v["success_rate"]), v["episodes"]) for k, v in s["success_rate_by_target"].items()))
 
@@ -200,11 +217,14 @@ def main():
     p.add_argument("--splits", default="heldout_combos,heldout_seeds")
     p.add_argument("--episodes", type=int, default=500, help="per split")
     p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--out", help="default: runs/diagnose/<policy>_<level>")
+    p.add_argument("--shuffle-missions", action="store_true",
+                   help="language ablation: give the policy another episode's mission")
+    p.add_argument("--out", help="default: runs/diagnose/<policy>_<level>[_shuffled]")
     args = p.parse_args()
 
     meta = load_meta(args.data)
-    out = args.out or os.path.join("runs", "diagnose", "%s_%s" % (args.policy, meta["level"]))
+    out = args.out or os.path.join("runs", "diagnose", "%s_%s%s" % (
+        args.policy, meta["level"], "_shuffled" if args.shuffle_missions else ""))
     os.makedirs(out, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     policy = None if args.policy == "bot" else load_policy(args.policy, args.ckpt, device)
@@ -213,7 +233,7 @@ def main():
         if args.policy == "bot":
             policy = ReplayPolicy(data)  # replays this split's demos, so rebuilt per split
         records = run(policy, meta["level"], meta["tile_size"], data.seeds[:args.episodes].tolist(),
-                      data.bot_lengths(), args.batch_size)
+                      data.bot_lengths(), args.batch_size, args.shuffle_missions)
         summary = summarize(records)
         print(split)
         print_summary(summary)
