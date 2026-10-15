@@ -20,3 +20,6 @@ Coding Examples introduced in "Reinforcement Learning" written by Sutton & Barto
 ## HandWritten Letters Classification with Chainer
 ![Handwritten Letters](https://user-images.githubusercontent.com/11141442/44194350-b03d0c00-a170-11e8-9a4a-466e4d53f1f1.png)
 ![Data](https://user-images.githubusercontent.com/11141442/44194351-b03d0c00-a170-11e8-8159-ed1b6a81de91.png)
+
+## Toy VLA on BabyAI
+Fine-tuning SmolVLM into a vision-language-action policy for BabyAI, sized for an RTX 2080. See [vla_babyai/](vla_babyai/README.md).
