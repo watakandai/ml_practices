@@ -23,8 +23,10 @@ EVAL_SPLITS = {"seen_seeds": "train", "heldout_seeds": "test_seeds", "heldout_co
 
 # no_grad: we only run the model forward, so PyTorch needn't store anything for backprop.
 @torch.no_grad()
-def run_episodes(policy, level, seeds, tile_size=8, batch_size=32):
-    """Roll the policy out on each seed. Returns (successes, lengths) arrays aligned with seeds."""
+def run_episodes(policy, level, seeds, tile_size=8, batch_size=32, max_steps=None):
+    """Roll the policy out on each seed. Returns (successes, lengths) arrays aligned with seeds.
+    max_steps, if set, cuts episodes short of the level's own limit and counts them as failures
+    (GoToSeq allows 2304 steps, which makes evaluating a wandering policy very slow)."""
     successes, lengths = [], []
     # Run up to batch_size environments side by side, so the model sees one batch per step
     # instead of one frame at a time (much faster on a GPU).
@@ -47,6 +49,8 @@ def run_episodes(policy, level, seeds, tile_size=8, batch_size=32):
                 length[i] += 1
                 if terminated or truncated:
                     success[i] = reward > 0  # positive reward = mission accomplished
+                elif max_steps and length[i] >= max_steps:
+                    success[i] = False
                 else:
                     still.append(i)  # keep stepping this one
             running = still
@@ -71,7 +75,7 @@ def evaluate_split(policy, level, seeds, bot_lengths, **kw):
     }
 
 
-def evaluate_all(policy, data_dir, episodes=200, batch_size=32, splits=EVAL_SPLITS):
+def evaluate_all(policy, data_dir, episodes=200, batch_size=32, splits=EVAL_SPLITS, max_steps=None):
     meta = load_meta(data_dir)  # level name and tile size the data was built with
     results = {}
     for column, split in splits.items():
@@ -82,7 +86,7 @@ def evaluate_all(policy, data_dir, episodes=200, batch_size=32, splits=EVAL_SPLI
         # Only the seeds are needed: the environment regenerates each level from its seed.
         seeds = data.seeds[:episodes].tolist()
         results[column] = evaluate_split(policy, meta["level"], seeds, data.bot_lengths(),
-                                         tile_size=meta["tile_size"], batch_size=batch_size)
+                                         tile_size=meta["tile_size"], batch_size=batch_size, max_steps=max_steps)
         r = results[column]
         print("  %-15s success %.3f  length/bot %.2f  (%d episodes)"
               % (column, r["success_rate"], r["length_ratio"], r["episodes"]))
@@ -107,6 +111,7 @@ def main():
     p.add_argument("--data", default="data/GoToLocal")
     p.add_argument("--episodes", type=int, default=200, help="episodes per split")
     p.add_argument("--batch-size", type=int, default=32, help="environments run in parallel")
+    p.add_argument("--max-steps", type=int, help="cut episodes at this many steps (counted as failures)")
     p.add_argument("--out", help="write results JSON here")
     args = p.parse_args()
     if args.out:  # create the output directory up front, before any slow work
@@ -115,7 +120,7 @@ def main():
     # Use the GPU when there is one.
     device = "cuda" if torch.cuda.is_available() else "cpu"
     policy = load_policy(args.policy, args.ckpt, device)
-    results = evaluate_all(policy, args.data, args.episodes, args.batch_size)
+    results = evaluate_all(policy, args.data, args.episodes, args.batch_size, max_steps=args.max_steps)
     if args.out:
         with open(args.out, "w") as f:
             json.dump(results, f, indent=2)

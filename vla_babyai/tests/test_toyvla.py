@@ -256,3 +256,70 @@ def test_diagnose_shuffle_missions(data_dir):
     assert [r["given_mission"] for r in records[-len(policy.given):]] == policy.given
     assert any(r["given_mission"] != r["mission"] for r in records)
     assert all(r["success"] for r in records)  # replayed bot actions don't depend on the mission
+
+
+class ConstantPolicy:
+    def reset(self, missions):
+        pass
+
+    def act(self, images, idx):
+        return [0] * len(idx)  # turn left forever: never succeeds
+
+
+def test_eval_max_steps_cuts_episodes(data_dir):
+    seeds = load_split(data_dir, "test_seeds").seeds[:3].tolist()
+    success, length = run_episodes(ConstantPolicy(), LEVEL, seeds, max_steps=5)
+    assert not success.any() and (length == 5).all()
+
+
+def test_rl_group_advantages():
+    from toyvla.rl import group_advantages
+    adv = group_advantages(np.array([1.0, 0.0, 0.5, 0.5]), group=2)
+    assert np.allclose(adv[:2], [1, -1], atol=1e-4) and np.isnan(adv[2:]).all()
+
+
+def test_rl_rollout_and_update(tiny_path, data_dir):
+    from toyvla import rl
+    torch.manual_seed(0)
+    vla = VLA.from_pretrained(tiny_path, image_size=64)
+    group = 3
+    envs = [make_env(LEVEL) for _ in range(2 * group)]
+    seeds = rl.sample_seeds(LEVEL, 2, np.random.default_rng(0), DEFAULT_HELDOUT_COMBOS)
+    assert all(s >= rl.RL_SEED_START for s in seeds)
+    reward, length, success, missions, steps = rl.rollout(vla, envs, seeds, group, "cpu", chunk=4)
+    assert len(steps["ep"]) == length.sum() and missions[0] == missions[group - 1]
+    assert not any(is_heldout_mission(m) for m in missions)
+    assert all(lp <= 0 for lp in steps["logp"])
+
+    # The PPO ratio is 1 on the rollout policy, so the clipped loss reduces to -mean(advantage).
+    idx = list(range(4))
+    inputs = vla.encode(np.stack([steps["frame"][i] for i in idx]), [missions[steps["ep"][i]] for i in idx],
+                        [steps["hist"][i] for i in idx])
+    adv = torch.tensor([1.0, -1.0, 0.5, 2.0])
+    loss, stats = rl.ppo_loss(vla, inputs, torch.tensor([steps["action"][i] for i in idx]),
+                              torch.tensor([steps["logp"][i] for i in idx]), adv)
+    assert abs(loss.item() + adv.mean().item()) < 1e-4 and stats["clip_frac"] == 0
+
+    args = type("A", (), {"micro_batch": 2, "grad_accum": 2, "ppo_epochs": 1, "temperature": 1.0, "clip": 0.2,
+                          "max_grad_norm": 1.0})()
+    fake_adv = np.where(np.arange(len(reward)) % 2 == 0, 1.0, -1.0)
+    before = [p.clone() for p in vla.model.parameters()]
+    opt = torch.optim.AdamW(vla.model.parameters(), lr=1e-3)
+    out = rl.update(vla, opt, torch.amp.GradScaler("cuda", enabled=False), missions, steps, fake_adv, args, "cpu",
+                    np.random.default_rng(0))
+    assert out["train_steps"] == len(steps["ep"]) and out["optimizer_steps"] >= 1
+    assert any(not torch.equal(a, b) for a, b in zip(before, vla.model.parameters()))
+
+
+def test_rl_cli(tiny_path, data_dir, tmp_path, monkeypatch):
+    from toyvla import rl
+    init = tmp_path / "init"
+    VLA.from_pretrained(tiny_path, image_size=64).save(str(init))
+    out = tmp_path / "rl"
+    monkeypatch.setattr(sys, "argv", [
+        "rl", "--init", str(init), "--data", data_dir, "--out", str(out), "--iters", "2", "--seeds-per-iter", "2",
+        "--group", "2", "--micro-batch", "2", "--grad-accum", "2", "--eval-every", "1", "--eval-episodes", "2",
+        "--final-eval-episodes", "2", "--eval-max-steps", "10", "--save-every", "1"])
+    rl.main()
+    assert set(json.load(open(out / "results.json"))) == {"seen_seeds", "heldout_seeds", "heldout_combos"}
+    assert not os.path.exists(out / "last.pt")

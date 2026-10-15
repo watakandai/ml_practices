@@ -205,6 +205,7 @@ def main():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--channels", type=int, default=64)
     p.add_argument("--eval-episodes", type=int, default=200, help="per split, after training")
+    p.add_argument("--eval-max-steps", type=int, help="cut evaluation episodes at this many steps (failures)")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
@@ -242,7 +243,8 @@ def main():
     # state_dict() holds all weights; the vocab and config are needed to rebuild the model.
     torch.save({"model": model.state_dict(), "vocab": vocab.words, "config": config}, ckpt)
     print("saved %s; evaluating" % ckpt)
-    results = evaluate_all(BaselinePolicy(model, vocab, device), args.data, args.eval_episodes)
+    results = evaluate_all(BaselinePolicy(model, vocab, device), args.data, args.eval_episodes,
+                           max_steps=args.eval_max_steps)
     with open(os.path.join(args.out, "results.json"), "w") as f:
         json.dump(results, f, indent=2)
 

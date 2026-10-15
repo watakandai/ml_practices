@@ -159,6 +159,7 @@ def main():
     p.add_argument("--eval-every", type=int, default=500, help="optimizer steps; 0 disables")
     p.add_argument("--eval-episodes", type=int, default=100, help="held-out seeds during training")
     p.add_argument("--final-eval-episodes", type=int, default=500, help="per split, after training")
+    p.add_argument("--eval-max-steps", type=int, help="cut evaluation episodes at this many steps (failures)")
     p.add_argument("--save-every", type=int, default=100,
                    help="optimizer steps between resumable checkpoints (out/last.pt); 0 disables")
     p.add_argument("--resume", action="store_true", help="continue from out/last.pt if it exists")
@@ -249,7 +250,7 @@ def main():
         if args.eval_every and step % args.eval_every == 0 and step < args.max_steps:
             r = evaluate_split(VLAPolicy(vla, device), meta["level"],
                                heldout.seeds[:args.eval_episodes].tolist(), heldout.bot_lengths(),
-                               tile_size=meta["tile_size"])
+                               tile_size=meta["tile_size"], max_steps=args.eval_max_steps)
             r["step"] = step
             print("eval heldout_seeds", json.dumps(r))
             log.write(json.dumps({"eval_heldout_seeds": r}) + "\n")
@@ -269,7 +270,7 @@ def main():
         policy = VLAPolicy.load(final, device)
     else:
         policy = VLAPolicy(vla, device)
-    results = evaluate_all(policy, args.data, args.final_eval_episodes)
+    results = evaluate_all(policy, args.data, args.final_eval_episodes, max_steps=args.eval_max_steps)
     with open(os.path.join(args.out, "results.json"), "w") as f:
         json.dump(results, f, indent=2)
 
