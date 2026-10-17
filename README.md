@@ -23,3 +23,6 @@ Coding Examples introduced in "Reinforcement Learning" written by Sutton & Barto
 
 ## Toy VLA on BabyAI
 Fine-tuning SmolVLM into a vision-language-action policy for BabyAI, sized for an RTX 2080. See [vla_babyai/](vla_babyai/README.md).
+
+## Football Positioning Coach
+A VLA-style policy for build-up play: pretrain on tracking data, fine-tune on good play, then RL in Google Research Football. M1 (data and GRF alignment) is in place. See [football_coach/](football_coach/README.md).
