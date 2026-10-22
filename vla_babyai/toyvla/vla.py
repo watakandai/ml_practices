@@ -97,15 +97,20 @@ class VLA:
 
     @classmethod
     def from_pretrained(cls, name=DEFAULT_MODEL, history=4, image_size=512, lora_rank=0,
-                        freeze_vision=False, dtype=torch.float32):
+                        freeze_vision=False, dtype=torch.float32, random_init=False):
         # Imported here so modules that never build a VLA don't pay transformers' import time.
-        from transformers import AutoModelForImageTextToText, AutoProcessor
+        from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
         # "name" is a Hub id or a local folder (a saved checkpoint); both work the same way.
         processor = AutoProcessor.from_pretrained(name)
         # fp32 master weights by default; training runs under fp16 autocast (Turing has no bf16).
         # attn_implementation="sdpa": PyTorch's built-in fused attention (FlashAttention-2
         # needs a newer GPU than the RTX 2070).
-        model = AutoModelForImageTextToText.from_pretrained(name, dtype=dtype, attn_implementation="sdpa")
+        if random_init:
+            # Same architecture and tokenizer, freshly initialized weights: the pretraining ablation.
+            model = AutoModelForImageTextToText.from_config(AutoConfig.from_pretrained(name), dtype=dtype,
+                                                            attn_implementation="sdpa")
+        else:
+            model = AutoModelForImageTextToText.from_pretrained(name, dtype=dtype, attn_implementation="sdpa")
         if freeze_vision:
             # requires_grad False = no gradients, so the optimizer never changes these weights
             # and no memory is spent on their gradients or optimizer state.

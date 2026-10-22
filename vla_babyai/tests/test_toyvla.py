@@ -11,10 +11,10 @@ from tiny_vla import build_tiny_vla  # noqa: E402
 
 from toyvla import baseline, train_vla  # noqa: E402
 from toyvla.collect_demos import collect, rollout_bot, save_split  # noqa: E402
-from toyvla.common import (DEFAULT_HELDOUT_COMBOS, NUM_ACTIONS, TEST_SEED_START, is_heldout_mission,  # noqa: E402
-                           make_env, mission_combos)
+from toyvla.common import (DEFAULT_HELDOUT_COMBOS, NUM_ACTIONS, TEST_SEED_START, VAL_SEED_START,  # noqa: E402
+                           is_heldout_mission, make_env, mission_combos, wilson_ci)
 from toyvla.data import load_split  # noqa: E402
-from toyvla.evaluate import evaluate_all, run_episodes  # noqa: E402
+from toyvla.evaluate import evaluate_all, evaluate_split, run_episodes  # noqa: E402
 from toyvla.vla import VLA, VLAPolicy  # noqa: E402
 
 LEVEL = "GoToLocal"
@@ -26,8 +26,9 @@ def data_dir(tmp_path_factory):
     os.makedirs(d)
     combos = DEFAULT_HELDOUT_COMBOS
     train = collect(LEVEL, 0, {"train": (False, 60)}, combos, 8, 2)
+    val = collect(LEVEL, VAL_SEED_START, {"val": (False, 6)}, combos, 8, 2)
     test = collect(LEVEL, TEST_SEED_START, {"test_seeds": (False, 8), "test_combos": (True, 8)}, combos, 8, 2)
-    for name, eps in {**train, **test}.items():
+    for name, eps in {**train, **val, **test}.items():
         save_split(str(d / (name + ".npz")), eps)
     with open(d / "meta.json", "w") as f:
         json.dump({"level": LEVEL, "tile_size": 8, "heldout_combos": combos}, f)
@@ -82,7 +83,7 @@ def test_splits(data_dir):
 def test_bot_replay_evaluates_to_full_success(data_dir):
     data = load_split(data_dir, "test_seeds")
     policy = ScriptedPolicy(data)
-    success, length = run_episodes(policy, LEVEL, data.seeds.tolist(), batch_size=len(data))
+    success, length, *_ = run_episodes(policy, LEVEL, data.seeds.tolist(), batch_size=len(data))
     assert success.all()
     assert (length == data.lengths).all()
 
@@ -161,7 +162,7 @@ def test_vla_policy_and_save_load(tiny_path, data_dir, tmp_path):
     vla = VLA.from_pretrained(tiny_path, image_size=64)
     policy = VLAPolicy(vla, "cpu")
     seeds = load_split(data_dir, "test_seeds").seeds[:3].tolist()
-    success, length = run_episodes(policy, LEVEL, seeds, batch_size=2)
+    success, length, *_ = run_episodes(policy, LEVEL, seeds, batch_size=2)
     assert len(success) == 3 and (length >= 1).all()
     assert all(0 <= a < NUM_ACTIONS for h in policy.histories for a in h)
 
@@ -209,7 +210,8 @@ def test_train_vla_resumes_from_checkpoint(tiny_path, data_dir, tmp_path, monkey
     vla = VLA.from_pretrained(tiny_path, image_size=64)
     opt = torch.optim.AdamW(vla.model.parameters(), lr=1e-4)
     sched = train_vla.get_cosine_schedule_with_warmup(opt, 1, 4)
-    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    # Same setting as train_vla's own scaler, whose saved state it must load.
+    scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
     train_vla.init_optimizer_state(opt)
     for _ in range(3):
         opt.step()
@@ -268,7 +270,7 @@ class ConstantPolicy:
 
 def test_eval_max_steps_cuts_episodes(data_dir):
     seeds = load_split(data_dir, "test_seeds").seeds[:3].tolist()
-    success, length = run_episodes(ConstantPolicy(), LEVEL, seeds, max_steps=5)
+    success, length, *_ = run_episodes(ConstantPolicy(), LEVEL, seeds, max_steps=5)
     assert not success.any() and (length == 5).all()
 
 
@@ -323,3 +325,70 @@ def test_rl_cli(tiny_path, data_dir, tmp_path, monkeypatch):
     rl.main()
     assert set(json.load(open(out / "results.json"))) == {"seen_seeds", "heldout_seeds", "heldout_combos"}
     assert not os.path.exists(out / "last.pt")
+
+
+def test_shuffle_missions_rotates_and_marks_same_target(data_dir):
+    data = load_split(data_dir, "test_seeds")
+    seeds = data.seeds[:4].tolist()
+    given = []
+
+    class Recorder(ConstantPolicy):
+        def reset(self, missions):
+            given.extend(missions)
+
+    _, _, same, _ = run_episodes(Recorder(), LEVEL, seeds, max_steps=2, shuffle_missions=True)
+    true = data.missions[:4]
+    assert given == true[1:] + true[:1]
+    assert same.tolist() == [mission_combos(g) == mission_combos(m) for g, m in zip(given, true)]
+
+
+def test_random_init_and_train_episodes(tiny_path, data_dir):
+    pre = VLA.from_pretrained(tiny_path, image_size=64)
+    rnd = VLA.from_pretrained(tiny_path, image_size=64, random_init=True)
+    assert rnd.action_ids.tolist() == pre.action_ids.tolist()  # same tokenizer and action head
+    assert any(not torch.equal(a, b) for a, b in zip(pre.model.parameters(), rnd.model.parameters()))
+    train = load_split(data_dir, "train")
+    assert len(train_vla.StepDataset(train, 4, episodes=5)) == train.ep_start[5]
+    assert len(train_vla.StepDataset(train, 4)) == len(train.actions)
+
+
+def test_direct_success_matches_diagnose(data_dir):
+    from toyvla import diagnose
+    data = load_split(data_dir, "test_combos")
+    r = evaluate_split(ScriptedPolicy(data), LEVEL, data.seeds.tolist(), data.bot_lengths(), batch_size=len(data))
+    s = diagnose.summarize(diagnose.run(diagnose.ReplayPolicy(data), LEVEL, 8, data.seeds.tolist(),
+                                        data.bot_lengths(), len(data)))
+    assert r["success_rate"] == 1.0 and r["direct_success_rate"] == s["direct_successes"]
+    lo, hi = r["direct_success_ci95"]
+    assert lo <= r["direct_success_rate"] <= hi
+    # Turning left forever faces whatever is next to the agent, never reaching a target in GoToLocal.
+    _, _, _, wrong = run_episodes(ConstantPolicy(), LEVEL, data.seeds[:3].tolist(), max_steps=8)
+    assert (wrong >= 0).all()
+
+
+def test_wilson_and_summarize():
+    from toyvla.summarize import across_runs, summarize
+    lo, hi = wilson_ci(50, 100)
+    assert lo < 0.5 < hi and abs((hi - lo) - 0.19) < 0.01
+    assert wilson_ci(0, 10)[0] == 0.0
+    runs = [{"heldout_combos": {"success_rate": v, "length_ratio": 1.0}} for v in (0.5, 0.6, 0.7)]
+    s = summarize(runs)["heldout_combos"]["success_rate"]
+    assert abs(s["mean"] - 0.6) < 1e-9 and abs(s["ci95"] - 4.303 * 0.1 / 3 ** 0.5) < 1e-6
+    assert np.isnan(across_runs([0.5])[1])
+
+
+def test_train_vla_selects_on_validation(tiny_path, data_dir, tmp_path, monkeypatch):
+    out = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", [
+        "train_vla", "--model", tiny_path, "--data", data_dir, "--out", str(out), "--image-size", "64",
+        "--micro-batch", "2", "--grad-accum", "1", "--max-steps", "4", "--warmup", "1", "--log-every", "2",
+        "--eval-every", "2", "--eval-episodes", "2", "--val-steps", "8", "--final-eval-episodes", "2",
+        "--eval-max-steps", "5", "--workers", "0"])
+    train_vla.main()
+    evals = [json.loads(line)["eval_val"] for line in open(out / "log.jsonl") if "eval_val" in line]
+    assert [e["step"] for e in evals] == [2, 4] and all(e["val_loss"] > 0 for e in evals)
+    sel = json.load(open(out / "selection.json"))
+    best_step = min(evals, key=lambda e: e["val_loss"])["step"]
+    assert sel["step"] == best_step and sel["selected"] == ("final" if best_step == 4 else "best")
+    assert os.path.exists(out / "best") == (best_step != 4)
+    assert "direct_success_rate" in json.load(open(out / "results.json"))["heldout_combos"]

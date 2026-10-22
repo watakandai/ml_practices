@@ -1,6 +1,7 @@
 """Shared constants and helpers: environment construction, action names, mission parsing."""
 import contextlib  # redirect_stdout, used to silence MiniGrid's prints
 import io  # StringIO: an in-memory "file" that swallows those prints
+import math
 import re  # regular expressions, used to find "<color> <type>" phrases in missions
 
 import gymnasium as gym  # the standard RL environment API (reset/step/render)
@@ -29,6 +30,9 @@ _COMBO_RE = re.compile(r"\b(?:(%s) )?(%s)\b" % ("|".join(COLORS), "|".join(OBJEC
 # Training and test seeds come from disjoint ranges.
 # A seed fully determines a level's layout, so disjoint ranges guarantee unseen test layouts.
 TRAIN_SEED_START = 0
+# Validation levels (training combos only) for model selection, between the RL range
+# (1,000,000-8,999,999, toyvla.rl) and the test range.
+VAL_SEED_START = 9_000_000
 TEST_SEED_START = 10_000_000
 
 
@@ -76,3 +80,21 @@ def parse_combos(spec):
         return []
     # Split on commas into "red-ball" items, then each item on "-" into (color, type).
     return [tuple(item.split("-")) for item in spec.split(",")]
+
+
+def faced_object(u):
+    """The object in the cell directly in front of the agent, or None. u is the raw MiniGrid env."""
+    # front_pos = (x, y) of the cell the agent faces; grid.get returns whatever is there
+    # (None for empty floor). Walls are not objects a mission can name.
+    obj = u.grid.get(*u.front_pos)
+    return obj if obj is not None and obj.type in OBJECT_TYPES else None
+
+
+def wilson_ci(successes, n, z=1.96):
+    """95% Wilson score interval for a success rate; better than p +- 1.96 SE near 0 or 1."""
+    if n == 0:
+        return float("nan"), float("nan")
+    p = successes / n
+    center = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return max(0.0, center - half), min(1.0, center + half)  # clamp float rounding at 0 and 1

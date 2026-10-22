@@ -24,21 +24,9 @@ from collections import defaultdict
 import numpy as np
 import torch
 
-from .common import make_env, mission_combos, quiet_reset
+from .common import faced_object, make_env, mission_combos, quiet_reset
 from .data import load_meta, load_split
 from .evaluate import EVAL_SPLITS, load_policy
-
-# Things a mission can name; walls and empty floor are not objects.
-OBJECT_TYPES = ("ball", "box", "key", "door")
-
-
-def faced_object(u):
-    """The object in the cell directly in front of the agent, or None."""
-    # u is the raw MiniGrid env. front_pos = (x, y) of the cell the agent faces;
-    # grid.get returns whatever is there (None for empty floor).
-    obj = u.grid.get(*u.front_pos)
-    return obj if obj is not None and obj.type in OBJECT_TYPES else None
-
 
 def relation(obj, desc):
     """How a wrong object relates to the instruction's object description."""

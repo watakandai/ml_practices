@@ -47,8 +47,12 @@ Commands below are shown without the `uv run` prefix.
 python -m toyvla.setup_check --out runs/m1_256m.json
 python -m toyvla.setup_check --model HuggingFaceTB/SmolVLM-500M-Instruct --lora-rank 16 --out runs/m1_500m_lora.json
 
-# M2: bot demos + held-out splits (~1 min for 10k GoToLocal episodes)
+# M2: bot demos + val and held-out splits (~1 min for 10k GoToLocal episodes)
 python -m toyvla.collect_demos --level GoToLocal --episodes 10000
+python -m toyvla.collect_demos --level GoToLocal --splits val            # add val to older data
+# the same level with another held-out combo set (sets B and C used for replicates)
+python -m toyvla.collect_demos --heldout-combos blue-ball,purple-key,red-box,grey-ball --out data/heldout_B
+python -m toyvla.collect_demos --heldout-combos green-ball,yellow-key,purple-box,grey-key --out data/heldout_C
 
 # M3: from-scratch baseline (trains, then evaluates all three splits)
 python -m toyvla.baseline --data data/GoToLocal --out runs/baseline/GoToLocal
@@ -65,6 +69,12 @@ python -m toyvla.evaluate --policy baseline --ckpt runs/baseline/GoToLocal/model
 # M5 ablations
 python -m toyvla.train_vla --history 0 --out runs/vla256_h0/GoToLocal
 python -m toyvla.train_vla --image-size 256 --out runs/vla256_r256/GoToLocal
+python -m toyvla.train_vla --random-init --out runs/vla256_scratch/GoToLocal     # same architecture, no pretraining
+python -m toyvla.train_vla --train-episodes 1000 --out runs/vla256_n1k/GoToLocal # first 1k demos only
+
+# Language ablation on any level: each policy is given another episode's mission
+python -m toyvla.evaluate --policy vla --ckpt runs/vla256/PickupLoc/final --data data/PickupLoc \
+    --episodes 500 --shuffle-missions --out runs/shuffle_eval/vla256_PickupLoc.json
 
 # M6 harder levels. GoToSeq episodes are ~67 bot steps, so 4k demos (~2.5 GB of frames) instead of 10k,
 # and evaluation is cut at 512 steps (the level allows 2304) over 200 episodes per split.
@@ -75,6 +85,12 @@ python -m toyvla.baseline --data data/GoToSeq --out runs/baseline/GoToSeq --epoc
     --eval-episodes 200 --eval-max-steps 512
 python -m toyvla.train_vla --data data/PickupLoc --out runs/vla256/PickupLoc
 python -m toyvla.train_vla --data data/GoToSeq --out runs/vla256/GoToSeq --final-eval-episodes 200 --eval-max-steps 512
+
+# Replicates: one run per (training seed, held-out set), checkpoint picked by validation loss,
+# then the mean and 95% interval across runs
+python -m toyvla.train_vla --max-steps 4000 --eval-every 250 --seed 1 --data data/heldout_B/GoToLocal \
+    --out runs/calib4k_B/GoToLocal
+python -m toyvla.summarize runs/calib4k_A/GoToLocal runs/calib4k_B/GoToLocal runs/calib4k_C/GoToLocal
 
 # M7: RL fine-tuning of the SFT model
 python -m toyvla.rl --init runs/vla256/GoToLocal/final --data data/GoToLocal --out runs/vla256_rl/GoToLocal
@@ -97,9 +113,35 @@ Each split stores frames, actions, episode boundaries, seeds and missions. A see
 determines the level, so evaluation re-creates each episode from its seed. The stored bot
 episode length is the reference for the length metric.
 
+**Seeds.** Two unrelated kinds of seed appear in this project, and "seed" alone is ambiguous.
+
+- **Level seed:** the integer passed to `env.reset(seed=...)`. It fully determines one BabyAI
+  level: room layout, objects, agent start and mission. Ranges: demos from 0 upward, RL levels
+  1,000,000–9,000,000, test levels from 10,000,000 upward. "Seen seeds" and "held-out seeds" in
+  the tables mean training levels and new test levels.
+- **Training seed** (`--seed` on `train_vla`, `baseline`, `rl`): PyTorch's random number
+  generator for one training run. For a pretrained model it sets only the order in which
+  training examples are drawn; with `--random-init` it also sets the initial weights; in `rl` it
+  also picks the RL levels and the sampled actions. "Seed 0 vs seed 1" in the results means two
+  training runs with identical settings and data.
+
+Evaluation itself has no randomness: the policy takes the argmax action on a fixed list of level
+seeds (the first N of each split), so re-evaluating a checkpoint gives the same numbers.
+
+**Validation and checkpoint selection.** `val` holds 500 levels from seed 9,000,000 upward,
+training combos only. With a `val` split, `train_vla` rolls the model out on `--eval-episodes`
+validation levels and measures its loss on the first `--val-steps` validation examples every
+`--eval-every` updates (and at the end). It keeps the checkpoint with the lowest validation loss
+in `best/`, evaluates that one, and records the choice in `selection.json`. The test splits are
+never used for selection. Runs before 2026-10-19 had no `val` split and used the last checkpoint.
+
 **Evaluation.** Each table column is a success rate on one split: training seeds ("seen"),
 `test_seeds` and `test_combos`. `length_ratio` is the mean of policy steps ÷ bot steps over
-successful episodes; a value above 1 means the policy wanders. Environments run in parallel
+successful episodes; a value above 1 means the policy wanders. On GoTo levels,
+`direct_success_rate` counts only episodes solved without facing any other object first (see
+"Diagnosing the wandering"); it is the main GoTo metric from 2026-10-19 on, because plain
+success also rewards turning to face objects until one matches. Every rate comes with a 95%
+Wilson interval (`*_ci95`), which covers evaluation noise only, not run-to-run spread. Environments run in parallel
 batches, so the VLA forward pass is batched too.
 
 **Baseline (M3).** The model follows the BabyAI paper: a GRU instruction encoder, a conv stem,
@@ -205,6 +247,7 @@ GoToSeq mission is held out if any of its parts names one.
 | PickupLoc | SmolVLM-256M, SFT | 0.976 (1.05) | 0.974 (1.09) | 0.962 (1.63) |
 | GoToSeq | BabyAI CNN+GRU+FiLM, from scratch | 0.600 (3.34) | 0.550 (3.65) | 0.265 (4.17) |
 | GoToSeq | SmolVLM-256M, SFT | 0.450 (8.03) | 0.420 (3.90) | 0.220 (4.78) |
+| GoToSeq | SmolVLM-256M, SFT, history 16 | 0.530 (8.46) | 0.505 (4.99) | 0.290 (3.95) |
 
 The baselines ran on the CPU (15 epochs; PickupLoc 44 min, GoToSeq 3.5 h at 16 episodes per
 batch to fit in RAM).
@@ -217,16 +260,19 @@ took 2 h 9 min (final training loss 0.046, action accuracy 0.984), GoToSeq 2 h 3
   combos, against the baseline's 29% and its own 65% on GoToLocal. Standard error at 500
   episodes is under 1 point for the VLA and about 2 for the baseline, so the gap is real. Picking
   up a wrong object does not end the episode here, so the length ratio of 1.6 likely includes
-  some drop-and-retry. Why pickup grounds unseen combos so much better than GoTo is not yet
-  diagnosed; `toyvla.diagnose` only handles GoTo levels.
+  some drop-and-retry. A language ablation confirms the policy reads these
+  instructions (see "Pretraining, data and history ablations" below).
 - **GoToSeq: both policies fail often, and the VLA does worse in-distribution.** The VLA succeeds
   on 45% of seen seeds against the baseline's 60%, and on 42% of held-out seeds against 55%
   (about ±5 points of standard error at 200 episodes). On held-out combos the two are level
   (22% vs 26.5%). A GoToSeq mission needs memory of which sub-goals are done. The baseline has a
   GRU over the whole episode; the VLA sees only the current frame and its last 4 actions, so it
   cannot know where it is in the sequence. Its training action accuracy stops at 0.90, as does
-  the history-0 ablation's on GoToLocal, which also lacks information it needs. A longer action
-  history, past frames in the prompt, or a sub-goal counter would be the next things to try.
+  the history-0 ablation's on GoToLocal, which also lacks information it needs. A history of 16
+  actions (2 h 35 min, 6.3 GB) raises success by 7–8 points on every split, about 1.5 standard
+  errors each at 200 episodes and within the seed spread seen on GoToLocal. Training accuracy stays at
+  0.91, so the last 16 actions still do not tell the policy which sub-goals are done. Past frames
+  in the prompt or a sub-goal counter would be the next things to try.
 
 The length ratios here are biased low for the weaker policies, because the 512-step cutoff turns
 the longest wandering episodes into failures.
@@ -264,6 +310,89 @@ overflow. Results are the "SFT + RL" row of the GoToLocal table.
 To move held-out combos, RL would need either a weaker starting point with room to improve on
 training missions, or rollouts on the held-out instructions themselves, which would end the
 held-out evaluation.
+
+## Pretraining, data and history ablations
+
+SmolVLM-256M on GoToLocal, same settings as the SFT row (2000 updates at an effective batch of 64,
+about 2 h 10 min each on the RTX 2070, peak VRAM 6.2 GB, no fp16 overflow), changing one thing at a
+time. 500 episodes per split. "Wrong mission" is success when the policy is given another target's
+mission (`--shuffle-missions`), on held-out combos.
+
+| Variant | Train loss / action acc | Seen seeds | Held-out seeds | Held-out combos | Held-out combos, wrong mission |
+|---|---|---|---|---|---|
+| Pretrained, 10k demos, history 4 (the SFT row) | 0.058 / 0.983 | 0.992 (1.05) | 0.992 (1.06) | 0.652 (4.96) | 0.58 |
+| Same settings, seed 1 (`--seed 1`) | 0.138 / 0.944 | 0.982 (1.29) | 0.964 (1.22) | 0.536 (4.79) | |
+| Random init (`--random-init`), lr 5e-5 | 0.416 / 0.805 | 0.764 (3.55) | 0.780 (3.12) | 0.572 (3.85) | 0.58 |
+| Random init, lr 3e-4 | 0.480 / 0.786 | 0.596 (3.69) | 0.596 (3.00) | 0.548 (3.39) | |
+| 3k demos (`--train-episodes 3000`, 8 epochs) | 0.053 / 0.977 | 0.996 (1.09) | 0.962 (1.37) | 0.622 (4.01) | |
+| 1k demos (24 epochs) | 0.000 / 1.000 | 1.000 (1.00) | 0.914 (1.54) | 0.708 (3.08) | |
+| History 8 | 0.167 / 0.938 | 0.978 (1.27) | 0.974 (1.26) | 0.552 (4.72) | |
+
+- **Two runs with identical settings differ by 12 points on held-out combos** (65.2% with seed 0,
+  53.6% with seed 1), several times the ±2 points of evaluation noise. Seed 1 also fits the
+  training set less closely (0.94 vs 0.98 action accuracy). The seed sets the data order, so the
+  held-out combo number depends heavily on the training run, and every single-run gap on that
+  column below is within this spread.
+- **Without pretraining the model ignores the instruction.** The random-init model succeeds as
+  often with a wrong mission as with the true one, on held-out seeds too (79% vs 78%). It has
+  learned to roam, not to read. A higher learning rate makes it worse, so this is not just a
+  learning rate set for fine-tuning. The BabyAI baseline learns the instruction from the same
+  demos, so the issue is a 256M transformer trained from scratch for 2000 updates.
+- **About 57% is the roaming floor on held-out combos.** The random-init model gets 57%, and the
+  pretrained VLA given a wrong mission gets 58%. Pretraining adds 7–8 points on top of that, about
+  2.5 standard errors of evaluation noise, but the seed-1 run (54%) falls below the random-init
+  model. Pretraining is what lets the VLA read instructions at all (96–99% vs 78% on held-out
+  seeds), but on unseen GoTo combos it adds nothing that survives the run-to-run spread.
+- **More demos help held-out seeds, not held-out combos.** Held-out seed success rises from 91% at 1k
+  demos to 99% at 10k. Held-out combos stay between 62% and 71%, within noise of each other (about
+  ±2 points each). The 1k run fits its training set exactly and still generalizes to new combos as
+  well as the others.
+- **History 8 vs history 4 is not resolved.** History 8 gets 55% on held-out combos, between the two
+  history-4 seeds (65% and 54%), with the same 0.94 training accuracy as seed 1.
+
+**PickupLoc: the VLA does read unseen instructions.** Success with the true mission and with
+another target's mission, 500 episodes per split:
+
+| Policy | Seen seeds | Held-out seeds | Held-out combos |
+|---|---|---|---|
+| BabyAI CNN+GRU+FiLM, from scratch | 0.966 / 0.088 | 0.942 / 0.068 | 0.290 / 0.026 |
+| SmolVLM-256M, SFT | 0.976 / 0.092 | 0.974 / 0.104 | 0.962 / 0.039 |
+| SmolVLM-256M, random init | 0.268 / 0.215 | 0.236 / 0.237 | 0.070 / 0.068 |
+
+On PickupLoc a wrong mission drops the VLA from 96% to 4% on held-out combos, so its success there
+comes from reading the instruction, unlike on GoToLocal. In an 8×8 room with a few objects, a GoTo
+policy can succeed by turning to face objects until one matches. A pickup policy has to choose the
+object to pick up. The random-init model fails PickupLoc almost entirely (7% on held-out combos), so
+pretraining is what makes the 96% possible.
+
+## Calibration: training budget, seeds and held-out sets
+
+SmolVLM-256M SFT on GoToLocal, 4000 updates, validation every 250, checkpoint picked by
+validation loss. Sets B and C are listed under M2 in "Pipeline"; set A is the original
+(red ball, green key, blue box, yellow ball). 500 episodes per split; the bot's direct success
+is 68–69% on every split.
+
+| Held-out set | Training seed | Selected step | Held-out seeds: success / direct | Held-out combos: success / direct |
+|---|---|---|---|---|
+| A | 0 | 3250 | 1.000 / 0.692 | 0.536 / 0.160 |
+| A | 1 | 3500 | 0.994 / 0.682 | 0.730 / 0.326 |
+| A | 2 | 3750 | 0.998 / 0.688 | 0.794 / 0.506 |
+| B | 1 | 4000 | 0.996 / 0.690 | 0.890 / 0.548 |
+| C | 2 | 3250 | 0.988 / 0.686 | 0.876 / 0.466 |
+
+- **The old 2000-update budget undertrained.** Validation loss stops improving at 3000–3250
+  updates (0.04, against 0.08–0.10 at 2000). 4000 updates take about 4 h 25 min.
+- **In distribution the policies match the bot**: 99–100% on held-out seeds, direct success at
+  the bot's level.
+- **Held-out combo success depends on both the training seed and the held-out set.** On set A
+  the seed alone moves it by 26 points (54% to 79%), and the best set-A run is still below
+  sets B and C. Every set-A number in earlier sections comes from seed 0, the worst of the three.
+- **The failures differ by set** (`toyvla.diagnose`). Set A, seed 0 fails evenly on all four
+  targets (52–55%), and 54% of the wrong objects it faces share neither color nor type with the
+  target: it roams. Sets B and C fail on one or two pairs (B: grey ball 63%; C: grey key 77%,
+  yellow key 78%); the others score 92–100%.
+
+So a held-out combo comparison needs several training seeds per held-out set, reported per set.
 
 ## Rollouts
 
@@ -330,13 +459,20 @@ episodes whose given mission names a different target:
 |---|---|---|
 | Baseline, held-out seeds | 100% | 25% |
 | Baseline, held-out combos | 54% | 36% |
-| SmolVLM-256M, held-out seeds | 99% | |
-| SmolVLM-256M, held-out combos | 65% | |
+| SmolVLM-256M, held-out seeds | 99% | 54% |
+| SmolVLM-256M, held-out combos | 65% | 58% |
 
 On held-out seeds, whose instructions use combinations seen in training, the baseline clearly
 follows the instruction. On held-out combos,
 36 of its 54 points survive a wrong instruction, so they come from roaming into the target
 rather than from reading the mission.
+
+The VLA follows the instruction on held-out seeds too (99% falls to 54%). On held-out combos,
+58 of its 65 points survive a wrong instruction. The true mission adds about 7 points, roughly
+two standard errors, so the VLA barely uses an instruction it has not seen. Its edge over the
+baseline on held-out combos (65% vs 54%) comes from roaming more persistently, not from
+grounding the new color–object pairs: given a wrong mission it still succeeds 58% of the time,
+against the baseline's 36%.
 
 Success on held-out combos by target:
 

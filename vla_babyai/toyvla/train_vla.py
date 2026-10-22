@@ -23,6 +23,7 @@ import itertools
 import json
 import math
 import os
+import shutil
 import time
 
 import numpy as np
@@ -38,12 +39,15 @@ from .vla import DEFAULT_MODEL, VLA, VLAPolicy
 class StepDataset(torch.utils.data.Dataset):
     """Every (frame, mission, recent actions) -> action pair in a split."""
 
-    def __init__(self, data, history):
+    def __init__(self, data, history, episodes=None):
         self.data, self.history = data, history
+        # Episodes are stored back to back, so the first `episodes` of them are the first
+        # ep_start[episodes] steps.
+        self.steps = int(data.ep_start[episodes]) if episodes else len(data.actions)
 
     def __len__(self):
         # One training example per step (not per episode): ~54k for 10k GoToLocal episodes.
-        return len(self.data.actions)
+        return self.steps
 
     def __getitem__(self, i):
         # The DataLoader calls this with random indices i to assemble each micro-batch.
@@ -117,6 +121,25 @@ def optimizer_step(vla, opt, scaler, max_grad_norm=1.0):
     return grad_norm.item()
 
 
+@torch.no_grad()
+def validation_loss(vla, data, history, steps, device, batch_size=16, workers=2):
+    """Mean loss and action accuracy over the first `steps` (frame, mission, history) -> action
+    pairs of a split, in a fixed order so every evaluation sees the same examples."""
+    dataset = torch.utils.data.Subset(StepDataset(data, history), range(min(steps, len(data.actions))))
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, num_workers=workers,
+                                         collate_fn=Collate(vla.encode))
+    vla.model.eval()
+    total_loss = total_acc = n = 0.0
+    for inputs, actions in loader:
+        with autocast(device):
+            loss, acc = vla.loss(inputs.to(device), actions.to(device))
+        total_loss += loss.item() * len(actions)
+        total_acc += acc.item() * len(actions)
+        n += len(actions)
+    vla.model.train()
+    return total_loss / n, total_acc / n
+
+
 def save_checkpoint(path, step, vla, opt, sched, scaler):
     """Everything needed to resume: weights, AdamW moments, LR schedule and loss scale (~3 GB for
     the 256M model). Written to a temp file first so a crash mid-write keeps the previous one."""
@@ -146,6 +169,9 @@ def main():
     p.add_argument("--image-size", type=int, default=512, help="frame resolution fed to the vision encoder")
     p.add_argument("--lora-rank", type=int, default=0, help="0 = full fine-tune")
     p.add_argument("--freeze-vision", action="store_true")
+    p.add_argument("--random-init", action="store_true",
+                   help="same architecture with fresh weights instead of the pretrained ones")
+    p.add_argument("--train-episodes", type=int, help="train on the first N demo episodes only")
     # Gradient checkpointing: recompute activations during backward instead of storing them;
     # saves memory at the cost of extra compute.
     p.add_argument("--grad-checkpointing", action="store_true")
@@ -157,7 +183,11 @@ def main():
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--eval-every", type=int, default=500, help="optimizer steps; 0 disables")
-    p.add_argument("--eval-episodes", type=int, default=100, help="held-out seeds during training")
+    p.add_argument("--eval-episodes", type=int, default=100,
+                   help="validation levels (or held-out seeds, without a val split) rolled out during training")
+    p.add_argument("--val-steps", type=int, default=2048, help="validation examples for the validation loss")
+    p.add_argument("--select", choices=["val_loss", "last"], default="val_loss",
+                   help="checkpoint to evaluate at the end: lowest validation loss, or the last one")
     p.add_argument("--final-eval-episodes", type=int, default=500, help="per split, after training")
     p.add_argument("--eval-max-steps", type=int, help="cut evaluation episodes at this many steps (failures)")
     p.add_argument("--save-every", type=int, default=100,
@@ -166,6 +196,11 @@ def main():
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
+    if args.lora_rank and args.select == "val_loss":
+        # Saving a LoRA model merges its adapters into the weights in place (VLA.save), which
+        # would end training of the adapters; keep the last checkpoint instead.
+        print("--lora-rank: selecting the last checkpoint")
+        args.select = "last"
 
     torch.manual_seed(args.seed)  # reproducible data order
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -176,7 +211,8 @@ def main():
 
     # --- Model ---
     vla = VLA.from_pretrained(args.model, history=args.history, image_size=args.image_size,
-                              lora_rank=args.lora_rank, freeze_vision=args.freeze_vision)
+                              lora_rank=args.lora_rank, freeze_vision=args.freeze_vision,
+                              random_init=args.random_init)
     vla.model.to(device)  # move the weights onto the GPU
     if args.grad_checkpointing:
         vla.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -194,12 +230,12 @@ def main():
     # drop_last skips the final incomplete batch; persistent_workers keeps the workers alive
     # between epochs.
     loader = torch.utils.data.DataLoader(
-        StepDataset(train, args.history), batch_size=args.micro_batch, shuffle=True, drop_last=True,
+        StepDataset(train, args.history, args.train_episodes), batch_size=args.micro_batch, shuffle=True, drop_last=True,
         num_workers=args.workers, collate_fn=Collate(vla.encode), persistent_workers=args.workers > 0)
     # An endless stream of batches: when one pass (epoch) ends, start another, reshuffled.
     batches = itertools.chain.from_iterable(itertools.repeat(loader))
-    print("train: %d steps; %.1f epochs" % (len(train.actions),
-                                            args.max_steps * args.micro_batch * args.grad_accum / len(train.actions)))
+    n_steps = len(loader.dataset)
+    print("train: %d steps; %.1f epochs" % (n_steps, args.max_steps * args.micro_batch * args.grad_accum / n_steps))
 
     # --- Optimizer ---
     # AdamW: Adam with decoupled weight decay; keeps two running averages per weight.
@@ -208,8 +244,18 @@ def main():
     # Loss scaling is only needed for fp16 on the GPU; on CPU the scaler does nothing.
     scaler = torch.amp.GradScaler("cuda", enabled=device == "cuda")
     init_optimizer_state(opt)
-    heldout = load_split(args.data, "test_seeds")  # for the periodic success-rate check
+    # Periodic checks and checkpoint selection use the validation split (new training-range levels,
+    # training combos) so they never look at the test levels. Data collected before val existed
+    # falls back to rolling out held-out test seeds, for monitoring only.
+    has_val = os.path.exists(os.path.join(args.data, "val.npz"))
+    monitor = load_split(args.data, "val" if has_val else "test_seeds")
+    monitor_name = "val" if has_val else "heldout_seeds"
     meta = load_meta(args.data)
+    best_path, best_dir = os.path.join(args.out, "best.json"), os.path.join(args.out, "best")
+    best = {"step": None, "val_loss": float("inf")}
+    if args.resume and os.path.exists(best_path):
+        with open(best_path) as f:
+            best = json.load(f)
     log = open(os.path.join(args.out, "log.jsonl"), "a")  # "a" = append: a resumed run keeps the old lines
     ckpt_path = os.path.join(args.out, "last.pt")
     start = 1
@@ -246,16 +292,25 @@ def main():
             log.flush()  # write to disk now, so the log survives a crash
             losses, accs = [], []
 
-        # Every eval_every updates, roll the current model out on held-out seeds.
-        if args.eval_every and step % args.eval_every == 0 and step < args.max_steps:
+        # Every eval_every updates (and at the end, when there is a val split to select on),
+        # roll the current model out on validation levels and measure its validation loss.
+        if args.eval_every and (step % args.eval_every == 0 or (has_val and step == args.max_steps)):
             r = evaluate_split(VLAPolicy(vla, device), meta["level"],
-                               heldout.seeds[:args.eval_episodes].tolist(), heldout.bot_lengths(),
+                               monitor.seeds[:args.eval_episodes].tolist(), monitor.bot_lengths(),
                                tile_size=meta["tile_size"], max_steps=args.eval_max_steps)
-            r["step"] = step
-            print("eval heldout_seeds", json.dumps(r))
-            log.write(json.dumps({"eval_heldout_seeds": r}) + "\n")
-            log.flush()
             vla.model.train()  # VLAPolicy switched the model to eval mode; switch back
+            r["step"] = step
+            if has_val:
+                r["val_loss"], r["val_action_acc"] = validation_loss(vla, monitor, args.history, args.val_steps,
+                                                                     device, workers=min(args.workers, 2))
+                if r["val_loss"] < best["val_loss"] and args.select == "val_loss":
+                    best = {"step": step, "val_loss": r["val_loss"]}
+                    vla.save(best_dir)
+                    with open(best_path, "w") as f:
+                        json.dump(best, f)
+            print("eval %s" % monitor_name, json.dumps(r))
+            log.write(json.dumps({"eval_" + monitor_name: r}) + "\n")
+            log.flush()
 
         if args.save_every and step % args.save_every == 0 and step < args.max_steps:
             save_checkpoint(ckpt_path, step, vla, opt, sched, scaler)
@@ -265,9 +320,19 @@ def main():
     vla.save(final)
     if os.path.exists(ckpt_path):
         os.remove(ckpt_path)  # the final model supersedes it
-    print("saved %s; evaluating" % final)
-    if args.lora_rank:  # save() merged the adapters; reload the plain model for evaluation
-        policy = VLAPolicy.load(final, device)
+    selected, selected_step = final, args.max_steps
+    if args.select == "val_loss" and best["step"] is not None and best["step"] != args.max_steps:
+        selected, selected_step = best_dir, best["step"]
+    elif os.path.exists(best_dir):
+        shutil.rmtree(best_dir)  # the final model is the selected one; no need for a copy
+    with open(os.path.join(args.out, "selection.json"), "w") as f:
+        json.dump({"selected": os.path.basename(selected), "step": selected_step, "rule": args.select,
+                   "best_val_loss": best["val_loss"] if best["step"] is not None else None}, f, indent=2)
+    print("saved %s; evaluating %s (step %d)" % (final, selected, selected_step))
+    if args.lora_rank or selected != final:  # merged adapters, or another checkpoint: load from disk
+        del vla, opt, sched, trainable  # free GPU memory before loading the selected weights
+        torch.cuda.empty_cache()
+        policy = VLAPolicy.load(selected, device)
     else:
         policy = VLAPolicy(vla, device)
     results = evaluate_all(policy, args.data, args.final_eval_episodes, max_steps=args.eval_max_steps)

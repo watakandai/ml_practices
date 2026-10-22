@@ -1,7 +1,8 @@
 """M2: roll out the BabyAI bot and store (frames, mission, actions) per episode.
 
-Writes three splits under <out>/<level>/:
+Writes four splits under <out>/<level>/:
   train.npz        bot demos on training seeds, held-out combos excluded
+  val.npz          validation seeds (disjoint range), training combos only; for model selection
   test_seeds.npz   held-out seeds (disjoint seed range), training combos only
   test_combos.npz  held-out seeds whose mission names a held-out color-object combo
 
@@ -9,9 +10,10 @@ Every split has the same layout (see toyvla.data.EpisodeData), including the bot
 episode length per seed, which evaluation uses as the reference length.
 
   python -m toyvla.collect_demos --level GoToLocal --episodes 10000
+  python -m toyvla.collect_demos --level GoToLocal --splits val   # add val to an existing data dir
+  python -m toyvla.collect_demos --heldout-combos blue-ball,purple-key,red-box,grey-ball --out data/heldout_B
 """
 import argparse  # command-line flags
-import itertools  # itertools.count: an endless 0, 200, 400, ... sequence of chunk starts
 import json
 import multiprocessing as mp  # run several bots in parallel on different CPU cores
 import os
@@ -21,7 +23,7 @@ import numpy as np
 # A scripted expert that plans a path to solve any BabyAI mission; our "teacher" for imitation.
 from minigrid.utils.baby_ai_bot import BabyAIBot
 
-from .common import (DEFAULT_HELDOUT_COMBOS, TEST_SEED_START, TRAIN_SEED_START,
+from .common import (DEFAULT_HELDOUT_COMBOS, TEST_SEED_START, TRAIN_SEED_START, VAL_SEED_START,
                      is_heldout_mission, make_env, parse_combos, quiet_reset)
 
 # Each worker process handles this many consecutive seeds per task.
@@ -92,22 +94,22 @@ def save_split(path, episodes):
 def collect(level, seed_start, wants, heldout_combos, tile_size, workers):
     """Run seeds from seed_start until every split in wants = {split: (keep_heldout, count)} is full."""
     out = {name: [] for name in wants}  # split name -> list of episodes collected so far
-    # A lazy, endless stream of tasks: chunks starting at seed_start, seed_start + 200, ...
-    chunks = ((level, tile_size, s, heldout_combos) for s in itertools.count(seed_start, CHUNK))
+    start = seed_start
     with mp.Pool(workers) as pool:  # a pool of worker processes
-        # imap hands chunks to workers and yields their results in seed order.
-        for episodes in pool.imap(_collect_chunk, chunks):
-            for ep in episodes:
-                # Put the episode in the first split that wants this kind (held out or not)
-                # and still has room.
-                for name, (keep_heldout, count) in wants.items():
-                    if ep[4] == keep_heldout and len(out[name]) < count:
-                        out[name].append(ep)
-                        break
-            # Stop as soon as every split has enough; terminate kills the remaining workers.
-            if all(len(out[n]) >= c for n, (_, c) in wants.items()):
-                pool.terminate()
-                break
+        while not all(len(out[n]) >= c for n, (_, c) in wants.items()):
+            # One round of `workers` chunks at a time. Every round runs to completion: terminating
+            # the pool while workers are still sending back their (large) results can deadlock.
+            chunks = [(level, tile_size, s, heldout_combos) for s in range(start, start + workers * CHUNK, CHUNK)]
+            start += workers * CHUNK
+            # imap hands chunks to workers and yields their results in seed order.
+            for episodes in pool.imap(_collect_chunk, chunks):
+                for ep in episodes:
+                    # Put the episode in the first split that wants this kind (held out or not)
+                    # and still has room.
+                    for name, (keep_heldout, count) in wants.items():
+                        if ep[4] == keep_heldout and len(out[name]) < count:
+                            out[name].append(ep)
+                            break
     return out
 
 
@@ -117,6 +119,9 @@ def main():
     p.add_argument("--level", default="GoToLocal")
     p.add_argument("--episodes", type=int, default=10000, help="training episodes")
     p.add_argument("--test-episodes", type=int, default=500, help="episodes per test split")
+    p.add_argument("--val-episodes", type=int, default=500)
+    p.add_argument("--splits", default="train,val,test",
+                   help="which to collect: train, val, test (test = test_seeds and test_combos)")
     p.add_argument("--heldout-combos", default=",".join("%s-%s" % c for c in DEFAULT_HELDOUT_COMBOS),
                    help="comma-separated color-type pairs whose instructions are excluded from training")
     p.add_argument("--tile-size", type=int, default=8, help="pixels per grid cell; the frame is 7*tile_size square")
@@ -129,21 +134,38 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     t0 = time.time()
 
-    # Training data: seeds 0, 1, 2, ... keeping only missions that do NOT name a held-out combo.
-    train = collect(args.level, TRAIN_SEED_START, {"train": (False, args.episodes)}, combos, args.tile_size, args.workers)
-    # Test data: seeds from 10,000,000 up, split by whether the mission names a held-out combo.
-    test = collect(args.level, TEST_SEED_START,
-                   {"test_seeds": (False, args.test_episodes), "test_combos": (True, args.test_episodes)},
-                   combos, args.tile_size, args.workers)
-    # {**a, **b} merges the two dicts so all three splits are saved in one loop.
-    for name, episodes in {**train, **test}.items():
+    splits = args.splits.split(",")
+    meta_path = os.path.join(out_dir, "meta.json")
+    if "train" not in splits and os.path.exists(meta_path):
+        # Adding splits to existing data: they must use the same held-out combos and tile size.
+        with open(meta_path) as f:
+            meta = json.load(f)
+        if [tuple(c) for c in meta["heldout_combos"]] != combos or meta["tile_size"] != args.tile_size:
+            raise SystemExit("%s was collected with held-out combos %s and tile size %d"
+                             % (out_dir, meta["heldout_combos"], meta["tile_size"]))
+    out = {}
+    if "train" in splits:
+        # Training data: seeds 0, 1, 2, ... keeping only missions that do NOT name a held-out combo.
+        out.update(collect(args.level, TRAIN_SEED_START, {"train": (False, args.episodes)}, combos,
+                           args.tile_size, args.workers))
+    if "val" in splits:
+        # Validation data: seeds from 9,000,000 up, training combos only, so selecting a checkpoint
+        # on it never looks at the test levels or the held-out combos.
+        out.update(collect(args.level, VAL_SEED_START, {"val": (False, args.val_episodes)}, combos,
+                           args.tile_size, args.workers))
+    if "test" in splits:
+        # Test data: seeds from 10,000,000 up, split by whether the mission names a held-out combo.
+        out.update(collect(args.level, TEST_SEED_START,
+                           {"test_seeds": (False, args.test_episodes), "test_combos": (True, args.test_episodes)},
+                           combos, args.tile_size, args.workers))
+    for name, episodes in out.items():
         if len(episodes) == 0:
             print("  %s: no episodes (does this level name any held-out combo?)" % name)
             continue
         save_split(os.path.join(out_dir, name + ".npz"), episodes)
 
     # Record how the data was made, so evaluation can rebuild exactly the same environments.
-    with open(os.path.join(out_dir, "meta.json"), "w") as f:
+    with open(meta_path, "w") as f:
         json.dump({"level": args.level, "tile_size": args.tile_size, "heldout_combos": combos}, f, indent=2)
     print("done in %.0fs" % (time.time() - t0))
 
