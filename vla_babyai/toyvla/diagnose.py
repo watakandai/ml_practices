@@ -207,6 +207,7 @@ def main():
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--shuffle-missions", action="store_true",
                    help="language ablation: give the policy another episode's mission")
+    p.add_argument("--guidance", type=float, default=1.0, help="VLA classifier-free guidance weight (1 = none)")
     p.add_argument("--out", help="default: runs/diagnose/<policy>_<level>[_shuffled]")
     args = p.parse_args()
 
@@ -215,7 +216,7 @@ def main():
         args.policy, meta["level"], "_shuffled" if args.shuffle_missions else ""))
     os.makedirs(out, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    policy = None if args.policy == "bot" else load_policy(args.policy, args.ckpt, device)
+    policy = None if args.policy == "bot" else load_policy(args.policy, args.ckpt, device, args.guidance)
     for split in args.splits.split(","):
         data = load_split(args.data, EVAL_SPLITS[split])
         if args.policy == "bot":

@@ -15,7 +15,7 @@ from toyvla.common import (DEFAULT_HELDOUT_COMBOS, NUM_ACTIONS, TEST_SEED_START,
                            is_heldout_mission, make_env, mission_combos, wilson_ci)
 from toyvla.data import load_split  # noqa: E402
 from toyvla.evaluate import evaluate_all, evaluate_split, run_episodes  # noqa: E402
-from toyvla.vla import VLA, VLAPolicy  # noqa: E402
+from toyvla.vla import NULL_MISSION, VLA, VLAPolicy  # noqa: E402
 
 LEVEL = "GoToLocal"
 
@@ -392,3 +392,44 @@ def test_train_vla_selects_on_validation(tiny_path, data_dir, tmp_path, monkeypa
     assert sel["step"] == best_step and sel["selected"] == ("final" if best_step == 4 else "best")
     assert os.path.exists(out / "best") == (best_step != 4)
     assert "direct_success_rate" in json.load(open(out / "results.json"))["heldout_combos"]
+
+
+def test_collate_mission_dropout(data_dir):
+    seen = []
+    collate = train_vla.Collate(lambda frames, missions, histories: seen.append(missions), mission_dropout=0.5)
+    data = load_split(data_dir, "train")
+    steps = train_vla.StepDataset(data, 4)
+    items = [steps[i] for i in range(len(steps))]
+    assert len(items) >= 200
+    torch.manual_seed(0)
+    collate(items)
+    dropped = [m == NULL_MISSION for m in seen[0]]
+    assert 0.4 < np.mean(dropped) < 0.6
+    assert all(m == it[1] for m, it, d in zip(seen[0], items, dropped) if not d)
+    train_vla.Collate(lambda f, m, h: seen.append(m))(items)
+    assert seen[1] == [it[1] for it in items]
+
+
+def test_vla_policy_guidance(tiny_path, data_dir):
+    vla = VLA.from_pretrained(tiny_path, image_size=64)
+    frames = load_split(data_dir, "train").frames[:4]
+    missions = ["go to the red ball", "go to a key", "go to the blue box", "go to the grey key"]
+    plain = VLAPolicy(vla, "cpu")
+    cond = plain.action_logits(frames, missions, [[]] * 4)
+    uncond = plain.action_logits(frames, [NULL_MISSION] * 4, [[]] * 4)
+    for w, expected in [(1.0, cond), (0.0, uncond), (3.0, uncond + 3.0 * (cond - uncond))]:
+        policy = VLAPolicy(vla, "cpu", guidance=w)
+        policy.reset(missions)
+        assert policy.act(frames, list(range(4))) == expected.argmax(-1).tolist()
+
+
+def test_train_vla_mission_dropout_and_guidance(tiny_path, data_dir, tmp_path, monkeypatch):
+    out = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", [
+        "train_vla", "--model", tiny_path, "--data", data_dir, "--out", str(out), "--image-size", "64",
+        "--micro-batch", "2", "--grad-accum", "1", "--max-steps", "2", "--warmup", "1", "--eval-every", "0",
+        "--final-eval-episodes", "2", "--eval-max-steps", "5", "--workers", "0",
+        "--mission-dropout", "0.5", "--final-guidance", "2"])
+    train_vla.main()
+    for name in ["results.json", "results_guidance2.json"]:
+        assert set(json.load(open(out / name))) == {"seen_seeds", "heldout_seeds", "heldout_combos"}

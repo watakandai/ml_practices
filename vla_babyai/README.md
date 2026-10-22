@@ -92,6 +92,12 @@ python -m toyvla.train_vla --max-steps 4000 --eval-every 250 --seed 1 --data dat
     --out runs/calib4k_B/GoToLocal
 python -m toyvla.summarize runs/calib4k_A/GoToLocal runs/calib4k_B/GoToLocal runs/calib4k_C/GoToLocal
 
+# Mission dropout: 10% of training missions replaced by a null mission; the final evaluation
+# also runs classifier-free guidance at each weight (results_guidance<w>.json). Queue: runs/mdrop_gpu.sh
+python -m toyvla.train_vla --max-steps 4000 --eval-every 250 --mission-dropout 0.1 --final-guidance 1.5 2 3 \
+    --out runs/mdrop10_A/GoToLocal
+python -m toyvla.evaluate --policy vla --ckpt runs/mdrop10_A/GoToLocal/best --guidance 2 --episodes 500
+
 # M7: RL fine-tuning of the SFT model
 python -m toyvla.rl --init runs/vla256/GoToLocal/final --data data/GoToLocal --out runs/vla256_rl/GoToLocal
 ```

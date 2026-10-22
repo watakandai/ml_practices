@@ -134,14 +134,16 @@ def evaluate_all(policy, data_dir, episodes=200, batch_size=32, splits=EVAL_SPLI
     return results
 
 
-def load_policy(kind, ckpt, device):
+def load_policy(kind, ckpt, device, guidance=1.0):
     # Imports sit inside the branches so evaluating the baseline never loads transformers.
     if kind == "baseline":
+        if guidance != 1.0:
+            raise ValueError("--guidance needs a VLA")
         from .baseline import BaselinePolicy
         return BaselinePolicy.load(ckpt, device)
     if kind == "vla":
         from .vla import VLAPolicy
-        return VLAPolicy.load(ckpt, device)
+        return VLAPolicy.load(ckpt, device, guidance)
     raise ValueError(kind)
 
 
@@ -155,6 +157,8 @@ def main():
     p.add_argument("--max-steps", type=int, help="cut episodes at this many steps (counted as failures)")
     p.add_argument("--shuffle-missions", action="store_true",
                    help="language ablation: give the policy another episode's mission")
+    p.add_argument("--guidance", type=float, default=1.0,
+                   help="VLA classifier-free guidance weight (1 = none); see VLAPolicy")
     p.add_argument("--out", help="write results JSON here")
     args = p.parse_args()
     if args.out:  # create the output directory up front, before any slow work
@@ -162,7 +166,7 @@ def main():
 
     # Use the GPU when there is one.
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    policy = load_policy(args.policy, args.ckpt, device)
+    policy = load_policy(args.policy, args.ckpt, device, args.guidance)
     results = evaluate_all(policy, args.data, args.episodes, args.batch_size, max_steps=args.max_steps,
                            shuffle_missions=args.shuffle_missions)
     if args.out:

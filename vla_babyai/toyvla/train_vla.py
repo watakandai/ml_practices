@@ -8,6 +8,8 @@ gradient accumulation to an effective batch of micro_batch * grad_accum (default
   # SmolVLM-500M + LoRA
   python -m toyvla.train_vla --model HuggingFaceTB/SmolVLM-500M-Instruct --lora-rank 16 --lr 2e-4 \\
       --out runs/vla500lora/GoToLocal
+  # Mission dropout, then evaluation without and with classifier-free guidance
+  python -m toyvla.train_vla --mission-dropout 0.1 --final-guidance 1 2 3 --out runs/mdrop/GoToLocal
 
 Glossary:
   micro-batch    the examples that go through the GPU together in one forward/backward pass
@@ -17,6 +19,9 @@ Glossary:
                  weights themselves stay in 32-bit
   GradScaler     multiplies the loss by a large factor before backprop so tiny fp16 gradients
                  don't round to zero, then divides it back out before the update
+  mission dropout  replacing the mission with NULL_MISSION in a random fraction of training
+                 examples, so the same model also learns what to do without an instruction;
+                 guidance (VLAPolicy) then contrasts the two at inference
 """
 import argparse
 import itertools
@@ -33,7 +38,7 @@ from transformers import get_cosine_schedule_with_warmup
 
 from .data import load_meta, load_split
 from .evaluate import evaluate_all, evaluate_split
-from .vla import DEFAULT_MODEL, VLA, VLAPolicy
+from .vla import DEFAULT_MODEL, NULL_MISSION, VLA, VLAPolicy
 
 
 class StepDataset(torch.utils.data.Dataset):
@@ -62,14 +67,21 @@ class Collate:
     A class rather than a function so it can be pickled and sent to DataLoader worker processes.
     """
 
-    def __init__(self, encode):
+    def __init__(self, encode, mission_dropout=0.0):
         self.encode = encode  # a PromptEncoder
+        self.mission_dropout = mission_dropout  # fraction of missions replaced by NULL_MISSION
 
     def __call__(self, items):
         # zip(*items) turns [(f1, m1, h1, a1), (f2, m2, h2, a2), ...] into
         # (f1, f2, ...), (m1, m2, ...), (h1, h2, ...), (a1, a2, ...).
         frames, missions, histories, actions = zip(*items)
-        return self.encode(np.stack(frames), list(missions), list(histories)), torch.tensor(actions)
+        missions = list(missions)
+        if self.mission_dropout:
+            # torch's generator, not numpy's: the DataLoader seeds torch differently in each
+            # worker process, while numpy's state would be copied, giving every worker the same draws.
+            drop = (torch.rand(len(missions)) < self.mission_dropout).tolist()
+            missions = [NULL_MISSION if d else m for m, d in zip(missions, drop)]
+        return self.encode(np.stack(frames), missions, list(histories)), torch.tensor(actions)
 
 
 def autocast(device):
@@ -172,6 +184,8 @@ def main():
     p.add_argument("--random-init", action="store_true",
                    help="same architecture with fresh weights instead of the pretrained ones")
     p.add_argument("--train-episodes", type=int, help="train on the first N demo episodes only")
+    p.add_argument("--mission-dropout", type=float, default=0.0,
+                   help="fraction of training examples whose mission is replaced by NULL_MISSION")
     # Gradient checkpointing: recompute activations during backward instead of storing them;
     # saves memory at the cost of extra compute.
     p.add_argument("--grad-checkpointing", action="store_true")
@@ -189,6 +203,9 @@ def main():
     p.add_argument("--select", choices=["val_loss", "last"], default="val_loss",
                    help="checkpoint to evaluate at the end: lowest validation loss, or the last one")
     p.add_argument("--final-eval-episodes", type=int, default=500, help="per split, after training")
+    p.add_argument("--final-guidance", type=float, nargs="+", default=[1.0],
+                   help="guidance weights for the final evaluation; 1 (no guidance) is always included "
+                        "and goes to results.json, weight w to results_guidance<w>.json")
     p.add_argument("--eval-max-steps", type=int, help="cut evaluation episodes at this many steps (failures)")
     p.add_argument("--save-every", type=int, default=100,
                    help="optimizer steps between resumable checkpoints (out/last.pt); 0 disables")
@@ -201,6 +218,8 @@ def main():
         # would end training of the adapters; keep the last checkpoint instead.
         print("--lora-rank: selecting the last checkpoint")
         args.select = "last"
+    if not args.mission_dropout and args.final_guidance != [1.0]:
+        print("warning: guidance without --mission-dropout; the model has never seen NULL_MISSION")
 
     torch.manual_seed(args.seed)  # reproducible data order
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -231,7 +250,7 @@ def main():
     # between epochs.
     loader = torch.utils.data.DataLoader(
         StepDataset(train, args.history, args.train_episodes), batch_size=args.micro_batch, shuffle=True, drop_last=True,
-        num_workers=args.workers, collate_fn=Collate(vla.encode), persistent_workers=args.workers > 0)
+        num_workers=args.workers, collate_fn=Collate(vla.encode, args.mission_dropout), persistent_workers=args.workers > 0)
     # An endless stream of batches: when one pass (epoch) ends, start another, reshuffled.
     batches = itertools.chain.from_iterable(itertools.repeat(loader))
     n_steps = len(loader.dataset)
@@ -335,9 +354,13 @@ def main():
         policy = VLAPolicy.load(selected, device)
     else:
         policy = VLAPolicy(vla, device)
-    results = evaluate_all(policy, args.data, args.final_eval_episodes, max_steps=args.eval_max_steps)
-    with open(os.path.join(args.out, "results.json"), "w") as f:
-        json.dump(results, f, indent=2)
+    for w in sorted(set([1.0] + args.final_guidance)):
+        policy.guidance = w
+        print("guidance %g" % w)
+        results = evaluate_all(policy, args.data, args.final_eval_episodes, max_steps=args.eval_max_steps)
+        name = "results.json" if w == 1.0 else "results_guidance%g.json" % w
+        with open(os.path.join(args.out, name), "w") as f:
+            json.dump(results, f, indent=2)
 
 
 if __name__ == "__main__":

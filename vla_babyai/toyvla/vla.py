@@ -28,6 +28,9 @@ DEFAULT_MODEL = "HuggingFaceTB/SmolVLM-256M-Instruct"
 # Names of the linear layers inside each transformer block that LoRA adapts:
 # the attention projections (q, k, v, o) and the MLP projections (gate, up, down).
 LORA_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+# Stands in for the mission when it is dropped in training (--mission-dropout) and in the
+# unconditional pass of guidance. Not a BabyAI mission, so it can't be mistaken for one.
+NULL_MISSION = "(none)"
 
 
 def action_token_ids(tokenizer):
@@ -165,10 +168,16 @@ class VLA:
 
 
 class VLAPolicy:
-    """Evaluation wrapper: batched, constrained greedy decoding with fp16 autocast on GPU."""
+    """Evaluation wrapper: batched, constrained greedy decoding with fp16 autocast on GPU.
 
-    def __init__(self, vla, device):
-        self.vla, self.device = vla, device
+    guidance w != 1 is classifier-free guidance over the action logits: a second pass with
+    NULL_MISSION gives unconditional logits u, and the action is argmax of u + w * (c - u), where
+    c are the logits with the true mission. w > 1 exaggerates what the mission changes about the
+    action. Only meaningful for a model trained with --mission-dropout, which has seen NULL_MISSION.
+    """
+
+    def __init__(self, vla, device, guidance=1.0):
+        self.vla, self.device, self.guidance = vla, device, guidance
         vla.model.eval()  # inference mode: disables dropout
 
     def reset(self, missions):
@@ -176,24 +185,34 @@ class VLAPolicy:
         # Each episode keeps its own list of past actions, fed back in the prompt.
         self.histories = [[] for _ in missions]
 
+    def action_logits(self, images, missions, histories):
+        """(B, 7) action logits for B prompts."""
+        inputs = self.vla.encode(images, missions, histories)
+        # autocast runs matrix multiplies in fp16 on the GPU (about 2x faster, half the memory).
+        with torch.autocast("cuda", dtype=torch.float16, enabled=self.device == "cuda"):
+            return self.vla.constrain(self.vla.logits(inputs.to(self.device)))
+
     @torch.no_grad()  # no gradients needed at inference: faster, less memory
     def act(self, images, idx):
         # Prompts for the episodes still running (idx), each with its own mission and history.
-        inputs = self.vla.encode(images, [self.missions[i] for i in idx], [self.histories[i] for i in idx])
-        # autocast runs matrix multiplies in fp16 on the GPU (about 2x faster, half the memory).
-        with torch.autocast("cuda", dtype=torch.float16, enabled=self.device == "cuda"):
-            logits = self.vla.logits(inputs.to(self.device))
+        histories = [self.histories[i] for i in idx]
+        logits = self.action_logits(images, [self.missions[i] for i in idx], histories)
+        if self.guidance != 1.0:
+            uncond = self.action_logits(images, [NULL_MISSION] * len(idx), histories)
+            # Raw logits rather than log-probabilities: the two differ by a per-row constant,
+            # which leaves the argmax unchanged.
+            logits = uncond + self.guidance * (logits - uncond)
         # Greedy, constrained decoding: the best of the 7 action tokens.
-        actions = self.vla.constrain(logits).argmax(-1).tolist()
+        actions = logits.argmax(-1).tolist()
         for i, a in zip(idx, actions):
             self.histories[i].append(a)  # remember it for the next prompt
         return actions
 
     @classmethod
-    def load(cls, path, device):
+    def load(cls, path, device, guidance=1.0):
         with open(os.path.join(path, "vla_config.json")) as f:
             cfg = json.load(f)  # {"history": ..., "image_size": ...}
         # A saved checkpoint is a normal Hugging Face folder, so from_pretrained loads it.
         vla = VLA.from_pretrained(path, **cfg)
         vla.model.to(device)
-        return cls(vla, device)
+        return cls(vla, device, guidance)
